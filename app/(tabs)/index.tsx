@@ -20,7 +20,7 @@ export default function HomeScreen() {
 
   // Basic SWR usage
   const { data, error, isLoading } = useSWR(
-    "https://data-app-bs97.onrender.com/messages",
+    "https://coding-bh7d.onrender.com/api/messages",
     fetcher
   );
 
@@ -67,9 +67,20 @@ export default function HomeScreen() {
         {Array.isArray(data) &&
           data.length > 0 &&
           data.map((message, idx) => {
+            // Guard against missing fields in the API response
+            const senderName = message?.sender?.username ?? "Unknown sender";
+            const text = message?.text ?? "(no text)";
+            const dateStr = message?.createdAt
+              ? new Date(message.createdAt).toLocaleString()
+              : "Unknown date";
+
+            if (!message?.sender) {
+              console.warn("Message missing sender:", message);
+            }
+
             return (
               <ThemedView
-                key={message._id ?? idx}
+                key={message?._id ?? idx}
                 style={{
                   marginBottom: 10,
                   backgroundColor: "#ffffff1a",
@@ -77,12 +88,12 @@ export default function HomeScreen() {
                   borderRadius: 5,
                 }}
               >
-                <ThemedText>{message.text}</ThemedText>
+                <ThemedText>{text}</ThemedText>
                 <ThemedText style={{ fontSize: 14, fontStyle: "italic" }}>
-                  Sender: {message.sender.username}
+                  Sender: {senderName}
                 </ThemedText>
                 <ThemedText style={{ fontSize: 14, color: "#888" }}>
-                  Date: {new Date(message.createdAt).toLocaleString()}{" "}
+                  Date: {dateStr}
                 </ThemedText>
               </ThemedView>
             );
