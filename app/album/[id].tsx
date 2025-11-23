@@ -4,11 +4,13 @@ import { ThemedView } from '@/components/themed-view';
 import { getDesignTokens, shadows } from '@/constants/design-tokens';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
+import * as Location from 'expo-location';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Easing, FlatList, Image, PanResponder, StyleSheet, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, Image, Modal, PanResponder, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // Animated Touchable for FAB (defined after all imports to satisfy lint rule)
 const AnimatedFab = Animated.createAnimatedComponent(TouchableOpacity);
@@ -238,16 +240,116 @@ export default function AlbumDetailScreen() {
     return <Animated.View style={[styles.imagePlaceholder, { backgroundColor }]} />;
   };
   // Bottom sheet (filters) logic
-  const filterBadges = [ 'All', 'Recent', 'Favorites', 'Mine', 'Shared' ];
+  // legacy filterBadges removed; using segmented media filters instead
   const collapsedHeight = 128; // increased for easier access (larger touch target & partial badge visibility)
-  const expandedHeight = 260; // full content height
+  const windowHeight = Dimensions.get('window').height;
+  const expandedHeight = Math.min(windowHeight * 0.75, 680); // dynamic height so all content (including tags) is visible
   const sheetHeight = useRef(new Animated.Value(collapsedHeight)).current;
   const isExpandedRef = useRef(false);
   const startHeightRef = useRef(collapsedHeight);
+  const [expanded, setExpanded] = useState(false); // react state to trigger UI changes
+  const [activeTab, setActiveTab] = useState<'all'|'picture'|'video'>('all');
+  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [location, setLocation] = useState<string | null>(null);
+  const [locationModalVisible, setLocationModalVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [nearby, setNearby] = useState<string[]>([]);
+  const [searchResults, setSearchResults] = useState<string[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const peoplePool = ['You', 'Alice', 'Bob', 'Charlie'];
+  const tagPool = ['Vacation', 'Family', 'Work', 'Favorites'];
+  const [selectedPeople, setSelectedPeople] = useState<string[]>([]);
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  // Location & search helper functions
+  const NOMINATIM_HEADERS = React.useMemo(() => ({
+    'Accept-Language': 'en',
+    'User-Agent': 'FolioApp/1.0 (contact: example@example.com)',
+    'Referer': 'https://folio-app.local'
+  }), []);
+
+  const fetchNearbyLocations = async (lat: number, lon: number) => {
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=6&addressdetails=1&q=${encodeURIComponent(lat.toFixed(3)+','+lon.toFixed(3))}`;
+      const res = await fetch(url, { headers: NOMINATIM_HEADERS });
+      const json: any[] = await res.json();
+      const names = json.map(j => formatPlace(j)).filter(Boolean);
+      const unique = names.filter((v,i,a) => a.indexOf(v) === i);
+      setNearby(unique.slice(0,6));
+    } catch {
+      setNearby([]);
+    }
+  };
+
+  // Helper to produce a concise place label from Nominatim result or reverse geocode address object
+  const formatPlace = (entry: any): string => {
+    const addr = entry?.address || entry; // reverseGeocodeAsync gives plain object
+    if (!addr) return entry?.display_name || '';
+    const name = addr.name || addr.amenity || addr.building || addr.neighbourhood || addr.suburb || addr.road;
+    const locality = addr.city || addr.town || addr.village || addr.hamlet;
+    const country = addr.country_code ? addr.country_code.toUpperCase() : (addr.country || '').split(/\s+/)[0];
+    let parts = [name, locality, country].filter(Boolean);
+    if (!parts.length) parts = [entry?.display_name || ''];
+    let label = parts.join(', ');
+    if (label.length > 40) label = label.slice(0, 37) + '…';
+    return label;
+  };
+  const handlePickLocation = async () => {
+    setLocationError(null);
+    setLocationLoading(true);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') throw new Error('Permission denied');
+      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      let label = `${pos.coords.latitude.toFixed(3)}, ${pos.coords.longitude.toFixed(3)}`;
+      try {
+        const geo = await Location.reverseGeocodeAsync({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
+        if (geo && geo[0]) {
+          label = formatPlace({ address: geo[0] });
+        }
+      } catch {}
+      setLocation(label);
+      fetchNearbyLocations(pos.coords.latitude, pos.coords.longitude);
+    } catch (e: any) {
+      setLocationError(e?.message || 'Location unavailable');
+    } finally {
+      setLocationLoading(false);
+    }
+  };
+
+  // Debounced search
+  const performSearch = React.useCallback(async (q: string) => {
+    if (!q.trim()) { setSearchResults([]); return; }
+    setSearchLoading(true);
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=8&addressdetails=1&q=${encodeURIComponent(q.trim())}`;
+      const res = await fetch(url, { headers: NOMINATIM_HEADERS });
+      const json: any[] = await res.json();
+      const names = json.map(j => formatPlace(j)).filter(Boolean);
+      const unique = names.filter((v,i,a) => a.indexOf(v) === i);
+      setSearchResults(unique);
+    } catch {
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [NOMINATIM_HEADERS]);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!locationModalVisible) return; // only when modal open
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => {
+      performSearch(searchQuery);
+    }, 300);
+    return () => { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current); };
+  }, [searchQuery, locationModalVisible, performSearch]);
 
   const toggleSheet = (toExpanded?: boolean) => {
     const target = (typeof toExpanded === 'boolean') ? (toExpanded ? expandedHeight : collapsedHeight) : (isExpandedRef.current ? collapsedHeight : expandedHeight);
     isExpandedRef.current = target === expandedHeight;
+    setExpanded(isExpandedRef.current);
     Animated.timing(sheetHeight, { toValue: target, duration: 240, easing: Easing.out(Easing.quad), useNativeDriver: false }).start();
   };
 
@@ -296,14 +398,169 @@ export default function AlbumDetailScreen() {
             </TouchableOpacity>
           </View>
           <View style={styles.sheetContent}>
-            {filterBadges.map(b => (
-              <View key={b} style={styles.filterBadge}>                  
-                <ThemedText style={styles.filterBadgeText}>{b}</ThemedText>
-              </View>
-            ))}
+            <ThemedText style={styles.filtersHeading}>Edit Filters:</ThemedText>
+            {/* Segmented tabs */}
+            <View style={styles.segmentedContainer}>
+              {['all','video','picture'].map(tab => {
+                const active = activeTab === tab;
+                return (
+                  <TouchableOpacity
+                    key={tab}
+                    onPress={() => setActiveTab(tab as any)}
+                    style={[styles.segmentButton, active && styles.segmentButtonActive]}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${tab} media filter`}
+                  >
+                    <ThemedText style={[styles.segmentButtonText, active && styles.segmentButtonTextActive]}>{tab === 'all' ? 'All' : tab.charAt(0).toUpperCase() + tab.slice(1)}</ThemedText>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {expanded && (
+              <>
+                {/* Date input */}
+                <TouchableOpacity
+                  onPress={() => setShowDatePicker(true)}
+                  style={styles.inputField}
+                  accessibilityRole="button"
+                  accessibilityLabel="Pick a date"
+                >
+                  <MaterialIcons name="calendar-today" size={18} color="#444" style={styles.inputIcon} />
+                  <ThemedText style={styles.inputPlaceholder}>
+                    {selectedDate ? selectedDate.toLocaleDateString() : 'Pick a date'}
+                  </ThemedText>
+                </TouchableOpacity>
+                {showDatePicker && (
+                  <DateTimePicker
+                    value={selectedDate || new Date()}
+                    mode="date"
+                    display={Platform.OS === 'ios' ? 'inline' : 'default'}
+                    onChange={(_event: any, date?: Date) => {
+                      setShowDatePicker(false);
+                      if (date) setSelectedDate(date);
+                    }}
+                  />
+                )}
+                {/* Location picker trigger */}
+                <TouchableOpacity
+                  onPress={() => { setLocationModalVisible(true); handlePickLocation(); }}
+                  style={styles.inputField}
+                  accessibilityRole="button"
+                  accessibilityLabel={location ? 'Location selected' : 'Open location picker'}
+                >
+                  <MaterialIcons name="location-on" size={20} color="#444" style={styles.inputIcon} />
+                  <ThemedText style={styles.inputPlaceholder}>
+                    {location ? location : (locationLoading ? 'Fetching...' : 'Add a location')}
+                  </ThemedText>
+                </TouchableOpacity>
+                {/* People */}
+                <ThemedText style={styles.sectionHeading}>People</ThemedText>
+                <View style={styles.chipRow}>
+                  <TouchableOpacity style={styles.addChip} accessibilityRole="button" accessibilityLabel="Add person">
+                    <MaterialIcons name="add" size={20} color="#444" />
+                  </TouchableOpacity>
+                  {peoplePool.map((p, idx) => {
+                    const active = selectedPeople.includes(p);
+                    return (
+                      <TouchableOpacity
+                        key={`person-${idx}`}
+                        onPress={() => setSelectedPeople(prev => active ? prev.filter(x => x!==p) : [...prev,p])}
+                        style={[styles.personChip, active && styles.personChipActive]}
+                      >
+                        <MaterialIcons name="person" size={18} color={active ? '#7033ff' : '#222'} style={styles.personAvatar} />
+                        <ThemedText style={[styles.personChipText, active && styles.personChipTextActive]}>{p}</ThemedText>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {/* Tags */}
+                <ThemedText style={styles.sectionHeading}>Tags</ThemedText>
+                <View style={styles.chipRow}>
+                  <TouchableOpacity style={styles.addChip} accessibilityRole="button" accessibilityLabel="Add tag">
+                    <MaterialIcons name="add" size={20} color="#444" />
+                  </TouchableOpacity>
+                  {tagPool.map((tag, idx) => {
+                    const active = selectedTags.includes(tag);
+                    return (
+                      <TouchableOpacity
+                        key={`tag-${idx}`}
+                        onPress={() => setSelectedTags(prev => active ? prev.filter(x => x!==tag) : [...prev, tag])}
+                        style={[styles.tagChip, active && styles.tagChipActive]}
+                      >
+                        <ThemedText style={[styles.tagChipText, active && styles.tagChipTextActive]}>{tag}</ThemedText>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </>
+            )}
           </View>
         </Animated.View>
       )}
+        {locationModalVisible && (
+          <Modal visible animationType="slide" transparent onRequestClose={() => setLocationModalVisible(false)}>
+            <View style={styles.locationModalBackdrop}>
+              <View style={styles.locationModal}>
+                <View style={styles.locationModalHeader}>
+                  <ThemedText style={styles.locationModalTitle}>Add Location</ThemedText>
+                  <TouchableOpacity onPress={() => setLocationModalVisible(false)} accessibilityRole="button" accessibilityLabel="Close location picker">
+                    <MaterialIcons name="close" size={24} color="#222" />
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.searchRow}>
+                  <MaterialIcons name="search" size={20} color="#555" style={{ marginRight: 6 }} />
+                  <TextInput
+                    placeholder="Zoek locaties"
+                    placeholderTextColor="#777"
+                    style={styles.searchInput}
+                    value={searchQuery}
+                    onChangeText={setSearchQuery}
+                    autoCorrect={false}
+                    autoCapitalize="none"
+                    returnKeyType="search"
+                  />
+                  {searchLoading && <ActivityIndicator size="small" color="#555" />}
+                </View>
+                <ScrollView style={styles.locationScroll} keyboardShouldPersistTaps="handled">
+                  <View style={styles.locationSection}>
+                    <ThemedText style={styles.locationSectionTitle}>Your Location</ThemedText>
+                    <TouchableOpacity style={styles.locationItem} onPress={() => { if (location) { setLocationModalVisible(false); } else { handlePickLocation(); } }}>
+                      {locationLoading ? <ActivityIndicator size="small" color="#444" /> : (
+                        <ThemedText style={styles.locationItemText}>{location || (locationError || 'Tap to fetch current location')}</ThemedText>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                  {!!nearby.length && (
+                    <View style={styles.locationSection}>
+                      <ThemedText style={styles.locationSectionTitle}>Nearby</ThemedText>
+                      {nearby.map((n, idx) => (
+                          <TouchableOpacity key={`nearby-${idx}`} style={styles.locationItem} onPress={() => { setLocation(n); setLocationModalVisible(false); }}>
+                            <ThemedText style={styles.locationItemText}>{n}</ThemedText>
+                          </TouchableOpacity>
+                        ))}
+                    </View>
+                  )}
+                  {!!searchResults.length && (
+                    <View style={styles.locationSection}>
+                      <ThemedText style={styles.locationSectionTitle}>Search Results</ThemedText>
+                      {searchResults.map((r, idx) => (
+                        <TouchableOpacity key={`search-${idx}`} style={styles.locationItem} onPress={() => { setLocation(r); setLocationModalVisible(false); }}>
+                          <ThemedText style={styles.locationItemText}>{r}</ThemedText>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
+                  {!searchResults.length && searchQuery.trim().length > 0 && (
+                    <View style={styles.locationSection}><ThemedText style={styles.locationEmpty}>Geen resultaten</ThemedText></View>
+                  )}
+                  <View style={[styles.locationSection, { paddingBottom: 28 }]}> 
+                    <ThemedText style={styles.locationAttribution}>Data © OpenStreetMap-bijdragers (Nominatim)</ThemedText>
+                  </View>
+                </ScrollView>
+              </View>
+            </View>
+          </Modal>
+        )}
       {!loading && !error && (
         <FlatList
           data={album?.images ?? []}
@@ -401,9 +658,8 @@ const styles = StyleSheet.create({
   },
   filtersTitle: { fontSize: 14, fontWeight: '600', letterSpacing: -0.3 },
   sheetContent: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
+    flexDirection: 'column',
+    gap: 14,
   },
   filterBadge: {
     backgroundColor: '#f5f5f5',
@@ -415,6 +671,48 @@ const styles = StyleSheet.create({
   },
   filterBadgeText: { fontSize: 12, fontWeight: '500' },
   galleryContent: { paddingBottom: 40 },
+  // New filter UI styles
+  sectionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+    flexWrap: 'wrap',
+  },
+  sectionBlock: {
+    marginBottom: 16,
+  },
+  sectionLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 6,
+    opacity: 0.7,
+  },
+  wrapRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  selectorBadge: {
+    backgroundColor: '#f5f5f5',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#d9d9d9',
+  },
+  selectorBadgeActive: {
+    backgroundColor: '#7033ff',
+    borderColor: '#7033ff',
+  },
+  selectorBadgeText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#222',
+  },
+  selectorBadgeTextActive: {
+    color: '#fff',
+  },
   imagePlaceholder: { height: 160, backgroundColor: '#eee', borderRadius: 12, marginBottom: 16 },
   emptyText: { opacity: 0.6, textAlign: 'center', marginTop: 40 },
   fab: {
@@ -464,6 +762,44 @@ const styles = StyleSheet.create({
   // hydrateBanner & hydrateText removed in favor of animated placeholders
   hydrateErrorBanner: { position: 'absolute', bottom: 100, left: 20, right: 20, backgroundColor: '#c00', padding: 12, borderRadius: 8 },
   hydrateErrorText: { color: '#fff', fontWeight: '600' },
+  // New redesigned filter styles
+  filtersHeading: { fontSize: 16, fontWeight: '600', marginBottom: 4, letterSpacing: -0.3 },
+  segmentedContainer: { flexDirection: 'row', backgroundColor: '#f5f5f5', padding: 6, borderRadius: 24, gap: 4, alignSelf: 'flex-start' },
+  segmentButton: { paddingHorizontal: 18, paddingVertical: 10, borderRadius: 20 },
+  segmentButtonActive: { backgroundColor: '#fff', shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 4, shadowOffset: { width: 0, height: 2 }, elevation: 2 },
+  segmentButtonText: { fontSize: 14, fontWeight: '500', textTransform: 'capitalize', color: '#222' },
+  segmentButtonTextActive: { color: '#000', fontWeight: '600' },
+  inputField: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12, borderWidth: 1, borderColor: '#e2e2e2' },
+  inputIcon: { marginRight: 10 },
+  inputPlaceholder: { fontSize: 14, color: '#444', fontWeight: '500' },
+  textInputInner: { flex: 1, fontSize: 14, color: '#111', padding: 0 },
+  sectionHeading: { fontSize: 13, fontWeight: '600', marginTop: 4, marginBottom: 4 },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  addChip: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#fafafa', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#e0e0e0' },
+  personChip: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 22, borderWidth: 1, borderColor: '#e0e0e0' },
+  personChipActive: { borderColor: '#7033ff' },
+  personAvatar: { marginRight: 6 },
+  personChipText: { fontSize: 14, fontWeight: '500', color: '#222' },
+  personChipTextActive: { color: '#7033ff', fontWeight: '600' },
+  tagChip: { backgroundColor: '#fff', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 22, borderWidth: 1, borderColor: '#e0e0e0' },
+  tagChipActive: { borderColor: '#7033ff' },
+  tagChipText: { fontSize: 14, fontWeight: '500', color: '#222' },
+  tagChipTextActive: { color: '#7033ff', fontWeight: '600' },
+  clearIconButton: { marginLeft: 'auto', paddingLeft: 8 },
+  // Location modal styles
+  locationModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.25)', justifyContent: 'flex-end' },
+  locationModal: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingTop: 12, maxHeight: '80%', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 10, shadowOffset: { width: 0, height: -4 } },
+  locationModalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginBottom: 8 },
+  locationModalTitle: { fontSize: 16, fontWeight: '600' },
+  searchRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f3f3f3', marginHorizontal: 20, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, marginBottom: 12 },
+  searchInput: { flex: 1, fontSize: 14, color: '#111', padding: 0 },
+  locationScroll: { paddingHorizontal: 8 },
+  locationSection: { marginBottom: 18, paddingHorizontal: 12 },
+  locationSectionTitle: { fontSize: 13, fontWeight: '600', marginBottom: 6, color: '#444' },
+  locationItem: { paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e5e5e5', marginBottom: 8 },
+  locationItemText: { fontSize: 13, color: '#222' },
+  locationEmpty: { fontSize: 12, color: '#777', fontStyle: 'italic' },
+  locationAttribution: { fontSize: 11, color: '#555', textAlign: 'center', opacity: 0.8 },
 });
 
 async function requestLibraryPermission() {
@@ -572,3 +908,5 @@ async function fetchAlbumById(albumId: string, token?: string | null) {
 
 // Hook into component scope via closure replacement: we'll patch handleAddImage after component definition
 // Instead, define it above return using function expression referencing state setters.
+
+// (removed stray handlePickLocation placeholder)
