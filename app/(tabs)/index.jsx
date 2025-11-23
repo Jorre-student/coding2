@@ -1,3 +1,5 @@
+// import { getDesignTokens } from "@/constants/design-tokens"; // not currently needed
+import { PrimaryButton } from '@/components/ui/primary-button';
 import { Image } from "expo-image";
 import { StyleSheet } from "react-native";
 
@@ -17,6 +19,8 @@ export default function HomeScreen() {
   const [fontsLoaded] = useFonts({
     InstrumentSerif_400Regular,
   });
+  // Access tokens if needed later (currently primary button handles its own colors)
+  // const t = getDesignTokens('light');
 
   // Basic SWR usage
   const { data, error, isLoading } = useSWR(
@@ -40,8 +44,11 @@ export default function HomeScreen() {
     >
       <ThemedView style={styles.titleContainer}>
         <ThemedText style={{ color: "#5fb6fdff" }} type="subtitle">
-          Mango
+          App
         </ThemedText>
+        <Link href="/login" asChild>
+          <PrimaryButton title="Log in" />
+        </Link>
       </ThemedView>
       <ThemedView>
         <Image
@@ -53,15 +60,7 @@ export default function HomeScreen() {
         <ThemedText style={{ marginBottom: 8 }} type="title">
           SWR Data Fetching
         </ThemedText>
-        <Link
-          href={"../settings"}
-          style={{
-            color: "white",
-            textDecorationLine: "underline",
-          }}
-        >
-          Go to login page
-        </Link>
+        {/* Removed old misplaced link; login button now under Mango title */}
         {isLoading && <ThemedText>Loading...</ThemedText>}
         {error && <ThemedText>Error loading data</ThemedText>}
         {Array.isArray(data) &&
@@ -109,6 +108,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
   },
+  // Login button replaced by PrimaryButton component
   stepContainer: {
     gap: 8,
     marginBottom: 8,

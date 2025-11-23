@@ -43,6 +43,15 @@ export default function TabLayout() {
           ),
         }}
       />
+      <Tabs.Screen
+        name="albums"
+        options={{
+          title: "Albums",
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={28} name="photo.on.rectangle" color={color} />
+          ),
+        }}
+      />
     </Tabs>
   );
 }
