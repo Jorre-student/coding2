@@ -8,8 +8,10 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Easing, FlatList, Image, StyleSheet, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Animated, Easing, FlatList, Image, PanResponder, StyleSheet, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+// Animated Touchable for FAB (defined after all imports to satisfy lint rule)
+const AnimatedFab = Animated.createAnimatedComponent(TouchableOpacity);
 
 interface Album {
   _id: string;
@@ -235,6 +237,44 @@ export default function AlbumDetailScreen() {
     });
     return <Animated.View style={[styles.imagePlaceholder, { backgroundColor }]} />;
   };
+  // Bottom sheet (filters) logic
+  const filterBadges = [ 'All', 'Recent', 'Favorites', 'Mine', 'Shared' ];
+  const collapsedHeight = 128; // increased for easier access (larger touch target & partial badge visibility)
+  const expandedHeight = 260; // full content height
+  const sheetHeight = useRef(new Animated.Value(collapsedHeight)).current;
+  const isExpandedRef = useRef(false);
+  const startHeightRef = useRef(collapsedHeight);
+
+  const toggleSheet = (toExpanded?: boolean) => {
+    const target = (typeof toExpanded === 'boolean') ? (toExpanded ? expandedHeight : collapsedHeight) : (isExpandedRef.current ? collapsedHeight : expandedHeight);
+    isExpandedRef.current = target === expandedHeight;
+    Animated.timing(sheetHeight, { toValue: target, duration: 240, easing: Easing.out(Easing.quad), useNativeDriver: false }).start();
+  };
+
+  // PanResponder for swipe up/down
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 4,
+      onPanResponderGrant: () => {
+        sheetHeight.stopAnimation((val: number) => {
+          startHeightRef.current = val;
+        });
+      },
+      onPanResponderMove: (_, g) => {
+        let next = startHeightRef.current - g.dy; // dy negative when dragging up -> increase height
+        next = Math.max(collapsedHeight, Math.min(expandedHeight, next));
+        sheetHeight.setValue(next);
+      },
+      onPanResponderRelease: () => {
+        sheetHeight.stopAnimation((val: number) => {
+          const midpoint = (collapsedHeight + expandedHeight) / 2;
+          toggleSheet(val > midpoint);
+        });
+      },
+    })
+  ).current;
+
   return (
     <ThemedView style={[styles.container, { backgroundColor: t.background }]}>      
       <Stack.Screen options={{ title: album?.name || 'Album' }} />
@@ -244,6 +284,25 @@ export default function AlbumDetailScreen() {
       )}
       {error && !loading && (
         <ThemedText style={styles.error}>{error}</ThemedText>
+      )}
+      {/* Bottom sheet filters (sticky at screen bottom) */}
+      {!loading && !error && (
+        <Animated.View style={[styles.bottomSheet, { height: sheetHeight }]} {...panResponder.panHandlers}>          
+          <View style={styles.bottomSheetGrab}>
+            <View style={styles.grabIndicator} />
+            <TouchableOpacity onPress={() => toggleSheet()} accessibilityRole="button" accessibilityLabel="Toggle filters" style={styles.filtersHeaderInline}>
+              <ThemedText style={styles.filtersTitle}>Filters</ThemedText>
+              <MaterialIcons name={isExpandedRef.current ? 'expand-less' : 'expand-more'} size={22} color={t.foreground} />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.sheetContent}>
+            {filterBadges.map(b => (
+              <View key={b} style={styles.filterBadge}>                  
+                <ThemedText style={styles.filterBadgeText}>{b}</ThemedText>
+              </View>
+            ))}
+          </View>
+        </Animated.View>
       )}
       {!loading && !error && (
         <FlatList
@@ -279,14 +338,22 @@ export default function AlbumDetailScreen() {
         </View>
       )}
       {/* Floating create image button */}
-      <TouchableOpacity
-        style={[styles.fab, { bottom: 70 + insets.bottom, backgroundColor: t.primary || '#7033ff' }, shadows.sm]}  
+      {/* Animated FAB positioned above sheet */}
+      <AnimatedFab
+        style={[
+          styles.fab,
+          shadows.sm,
+          {
+            backgroundColor: t.primary || '#7033ff',
+            bottom: Animated.add(sheetHeight, new Animated.Value(8 + insets.bottom)),
+          },
+        ]}
         onPress={handleAddImage}
         accessibilityRole="button"
         accessibilityLabel="Add image"
       >
         <MaterialIcons name="add" size={34} color="#fff" />
-      </TouchableOpacity>
+      </AnimatedFab>
     </ThemedView>
   );
 }
@@ -296,6 +363,57 @@ const styles = StyleSheet.create({
   titleTop: { marginBottom: 16 }, // retained style (title removed)
   centerWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   error: { color: '#c00', marginBottom: 12 },
+  bottomSheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: -2 },
+    elevation: 8,
+    zIndex: 100,
+  },
+  bottomSheetGrab: {
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  grabIndicator: {
+    width: 42,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#d0d0d0',
+    marginBottom: 6,
+  },
+  filtersHeaderInline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingBottom: 4,
+  },
+  filtersTitle: { fontSize: 14, fontWeight: '600', letterSpacing: -0.3 },
+  sheetContent: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  filterBadge: {
+    backgroundColor: '#f5f5f5',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e0e0e0',
+  },
+  filterBadgeText: { fontSize: 12, fontWeight: '500' },
   galleryContent: { paddingBottom: 40 },
   imagePlaceholder: { height: 160, backgroundColor: '#eee', borderRadius: 12, marginBottom: 16 },
   emptyText: { opacity: 0.6, textAlign: 'center', marginTop: 40 },
