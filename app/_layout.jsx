@@ -2,6 +2,7 @@ import { getDesignTokens } from "@/constants/design-tokens";
 import { DefaultTheme, ThemeProvider } from "@react-navigation/native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
+import { Provider as PaperProvider } from 'react-native-paper';
 import "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
 // Google Fonts (Expo) - use the packaged font variants instead of local TTFs
@@ -33,6 +34,7 @@ export default function RootLayout() {
     return null;
   }
   return (
+    <PaperProvider>
     <ThemeProvider value={DefaultTheme}>
       <SafeAreaView style={{ flex: 1, backgroundColor: t.background }} edges={["top"]}>
         <Stack>
@@ -46,5 +48,6 @@ export default function RootLayout() {
         <StatusBar style="dark" />
       </SafeAreaView>
     </ThemeProvider>
+    </PaperProvider>
   );
 }

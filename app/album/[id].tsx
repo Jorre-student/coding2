@@ -4,13 +4,14 @@ import { ThemedView } from '@/components/themed-view';
 import { getDesignTokens, shadows } from '@/constants/design-tokens';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import DateTimePicker from '@react-native-community/datetimepicker';
+// DateTimePicker removed (range handled by react-native-paper-dates)
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, Image, Modal, PanResponder, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, Image, Modal, PanResponder, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
+import { DatePickerModal } from 'react-native-paper-dates';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // Animated Touchable for FAB (defined after all imports to satisfy lint rule)
 const AnimatedFab = Animated.createAnimatedComponent(TouchableOpacity);
@@ -249,8 +250,10 @@ export default function AlbumDetailScreen() {
   const startHeightRef = useRef(collapsedHeight);
   const [expanded, setExpanded] = useState(false); // react state to trigger UI changes
   const [activeTab, setActiveTab] = useState<'all'|'picture'|'video'>('all');
-  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
-  const [showDatePicker, setShowDatePicker] = useState(false);
+  // Date range selection state
+  const [startDate, setStartDate] = useState<Date | null>(null);
+  const [endDate, setEndDate] = useState<Date | null>(null);
+  const [dateRangeOpen, setDateRangeOpen] = useState(false);
   const [location, setLocation] = useState<string | null>(null);
   const [locationModalVisible, setLocationModalVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -436,7 +439,11 @@ export default function AlbumDetailScreen() {
                   data={( () => {
                     const arr: { key: string; label: string; icon: keyof typeof MaterialIcons.glyphMap }[] = [];
                     arr.push({ key: 'media', label: activeTab === 'all' ? 'All' : activeTab.charAt(0).toUpperCase() + activeTab.slice(1), icon: activeTab === 'video' ? 'videocam' : activeTab === 'picture' ? 'photo' : 'insert-drive-file' });
-                    if (selectedDate) arr.push({ key: 'date', label: selectedDate.toLocaleDateString(), icon: 'calendar-today' });
+                    if (startDate && endDate) {
+                      const same = startDate.getTime() === endDate.getTime();
+                      arr.push({ key: 'date', label: same ? startDate.toLocaleDateString() : `${startDate.toLocaleDateString()} – ${endDate.toLocaleDateString()}`, icon: 'calendar-today' });
+                    }
+                    else if (startDate) arr.push({ key: 'date', label: `${startDate.toLocaleDateString()} → …`, icon: 'calendar-today' });
                     if (location) arr.push({ key: 'loc', label: location, icon: 'location-on' });
                     selectedPeople.forEach((p, i) => arr.push({ key: `p-${i}`, label: p, icon: 'person' }));
                     selectedTags.forEach((t, i) => arr.push({ key: `t-${i}`, label: t, icon: 'sell' }));
@@ -479,29 +486,53 @@ export default function AlbumDetailScreen() {
             </View>
             {expanded && (
               <>
-                {/* Date input */}
+                {/* Date range selector modal trigger (single or multi-day) */}
                 <TouchableOpacity
-                  onPress={() => setShowDatePicker(true)}
+                  onPress={() => setDateRangeOpen(true)}
                   style={[styles.inputField, styles.inputFieldSpaced]}
                   accessibilityRole="button"
-                  accessibilityLabel="Pick a date"
+                  accessibilityLabel="Pick a date range"
                 >
                   <MaterialIcons name="calendar-today" size={18} color="#444" style={styles.inputIcon} />
                   <ThemedText style={styles.inputPlaceholder}>
-                    {selectedDate ? selectedDate.toLocaleDateString() : 'Pick a date'}
+                    {startDate && endDate
+                      ? (startDate.getTime() === endDate.getTime()
+                        ? startDate.toLocaleDateString() // single day
+                        : `${startDate.toLocaleDateString()} – ${endDate.toLocaleDateString()}`)
+                      : 'Pick date range'}
                   </ThemedText>
+                  {(startDate || endDate) && (
+                    <TouchableOpacity
+                      onPress={() => { setStartDate(null); setEndDate(null); }}
+                      accessibilityLabel="Clear date range"
+                      style={styles.clearIconButton}
+                    >
+                      <MaterialIcons name="close" size={18} color="#666" />
+                    </TouchableOpacity>
+                  )}
                 </TouchableOpacity>
-                {showDatePicker && (
-                  <DateTimePicker
-                    value={selectedDate || new Date()}
-                    mode="date"
-                    display={Platform.OS === 'ios' ? 'inline' : 'default'}
-                    onChange={(_event: any, date?: Date) => {
-                      setShowDatePicker(false);
-                      if (date) setSelectedDate(date);
-                    }}
-                  />
-                )}
+                <DatePickerModal
+                  locale="en"
+                  mode="range"
+                  visible={dateRangeOpen}
+                  onDismiss={() => setDateRangeOpen(false)}
+                  startDate={startDate || undefined}
+                  endDate={endDate || undefined}
+                  onConfirm={({ startDate: s, endDate: e }) => {
+                    // Allow single-day selection (user selects same date twice or only one date then confirm)
+                    if (s && e && s.getTime() === e.getTime()) {
+                      setStartDate(s);
+                      setEndDate(e); // same
+                    } else {
+                      setStartDate(s || null);
+                      setEndDate(e || (s ? s : null));
+                    }
+                    setDateRangeOpen(false);
+                  }}
+                  saveLabel="Apply"
+                  uppercase={false}
+                  animationType="slide"
+                />
                 {/* Location picker trigger */}
                 <TouchableOpacity
                   onPress={() => { setLocationModalVisible(true); handlePickLocation(); }}
