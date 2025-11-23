@@ -1,9 +1,10 @@
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { PrimaryButton } from '@/components/ui/primary-button';
 import { getDesignTokens, shadows, typography } from '@/constants/design-tokens';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Link, useRouter } from 'expo-router';
+import { Link } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Image, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
 
@@ -27,6 +28,7 @@ function AlbumCard({ album }: { album: Album }) {
   })();
   const code = album.firstImageCode || fallbackFirst;
   const t = getDesignTokens('light');
+  const name = (album.name && String(album.name).trim()) || 'Untitled Album';
   return (
     <View style={[styles.card, { backgroundColor: t.card }, shadows.sm]}>
       {code ? (
@@ -34,7 +36,9 @@ function AlbumCard({ album }: { album: Album }) {
       ) : (
         <View style={styles.cardImagePlaceholder} />
       )}
-      <ThemedText style={[styles.cardTitle, { color: t.cardForeground, fontFamily: typography.fontSans }]}>{album.name || 'Untitled Album'}</ThemedText>
+      <View style={styles.cardTitleBar}>
+        <ThemedText style={styles.cardTitleText} numberOfLines={1}>{name}</ThemedText>
+      </View>
     </View>
   );
 }
@@ -46,8 +50,6 @@ export default function AlbumsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [hydrating, setHydrating] = useState(false);
-  const [profileOpen, setProfileOpen] = useState(false);
-  const router = useRouter();
 
   useEffect(() => {
     (async () => {
@@ -163,39 +165,16 @@ export default function AlbumsScreen() {
 
   const t = getDesignTokens('light');
 
-  const handleLogout = async () => {
-    try { await AsyncStorage.removeItem('session'); } catch {}
-    setProfileOpen(false);
-    router.replace('/login');
-  };
   return (
     <ScrollView contentContainerStyle={styles.scrollContent}>
       <ThemedView style={[styles.container, { backgroundColor: t.background }]}>
-        {/* Top navigation bar */}
-        <View style={styles.topBar}>
-          <ThemedText style={[styles.appName, { color: t.foreground, fontFamily: typography.fontSansSemiBold }]}>Folio</ThemedText>
-          <View style={styles.topBarActions}>
-            <TouchableOpacity accessibilityLabel="Profile" accessibilityRole="button" onPress={() => setProfileOpen(p => !p)} style={styles.iconButton}>
-              <MaterialIcons name="person" size={26} color={t.foreground} />
-            </TouchableOpacity>
-            <TouchableOpacity accessibilityLabel="Settings" accessibilityRole="button" onPress={() => router.push('/settings')} style={styles.iconButton}>
-              <MaterialIcons name="settings" size={26} color={t.foreground} />
-            </TouchableOpacity>
-          </View>
-        </View>
-        {profileOpen && (
-          <View style={[styles.profileMenu, { backgroundColor: t.card }, shadows.sm]}>
-            <ThemedText style={[styles.profileName, { color: t.foreground }]}>{username}</ThemedText>
-            <TouchableOpacity onPress={handleLogout} style={styles.logoutBtn} accessibilityLabel="Log out" accessibilityRole="button">
-              <ThemedText style={[styles.logoutText, { color: t.primary }]}>Log out</ThemedText>
-            </TouchableOpacity>
-          </View>
-        )}
         <ThemedText type="title" style={[styles.title, { color: t.foreground, fontFamily: typography.fontSans }]}>{username} Albums</ThemedText>
         <Link href="/create-album" asChild>
-          <TouchableOpacity style={[styles.createButton, { backgroundColor: t.primary }] }>
-            <ThemedText style={[styles.createButtonText, { color: t.primaryForeground, fontFamily: typography.fontSans }]}>Create Album</ThemedText>
-          </TouchableOpacity>
+          <PrimaryButton
+            title="Create Album"
+            leftIcon={<MaterialIcons name="folder" size={20} color="#fff" />}
+            style={{ marginBottom: 28 }}
+          />
         </Link>
 
         {loading && (
@@ -233,60 +212,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingTop: 20,
   },
-  topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 8,
-    marginBottom: 12,
-  },
-  appName: {
-    fontSize: 26,
-  },
-  topBarActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  iconButton: {
-    padding: 6,
-    borderRadius: 30,
-  },
-  profileMenu: {
-    position: 'absolute',
-    top: 60,
-    right: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderRadius: 12,
-    minWidth: 160,
-  },
-  profileName: {
-    fontSize: 16,
-    marginBottom: 10,
-    fontFamily: typography.fontSansMedium,
-  },
-  logoutBtn: {
-    paddingVertical: 10,
-    borderRadius: 8,
-  },
-  logoutText: {
-    fontSize: 16,
-    fontFamily: typography.fontSansSemiBold,
-  },
   title: {
     marginBottom: 24,
   },
-  createButton: {
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginBottom: 28,
-  },
-  createButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-  },
+  createButton: {},
+  createButtonText: {},
    albumsGrid: {
      flexDirection: 'column',
      // Single column: remove wrapping so items stack vertically
@@ -297,20 +227,20 @@ const styles = StyleSheet.create({
      overflow: 'hidden',
      marginBottom: 20,
    },
-  cardImage: {
-    width: '100%',
-    height: 180,
-  },
-  cardImagePlaceholder: {
-    width: '100%',
-    height: 180,
-    backgroundColor: '#eee',
-  },
-  cardTitle: {
+  cardImage: { width: '100%', height: 180 },
+  cardImagePlaceholder: { width: '100%', height: 180, backgroundColor: '#eee' },
+  cardTitleBar: {
+    backgroundColor: '#ffffff',
     paddingHorizontal: 12,
     paddingVertical: 10,
-    fontWeight: '600',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#00000010',
+  },
+  cardTitleText: {
     fontSize: 16,
+    fontWeight: '600',
+    color: '#000',
+    fontFamily: typography.fontSansSemiBold,
   },
    loadingWrap: {
      paddingVertical: 32,
