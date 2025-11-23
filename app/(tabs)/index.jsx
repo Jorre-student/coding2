@@ -20,7 +20,7 @@ export default function IndexGate() {
           try {
             const parsed = JSON.parse(raw);
             if (parsed?.token || parsed?.accessToken || parsed?.user || parsed?.username) {
-              router.replace('/(tabs)/albums');
+              router.replace('/albums');
             } else {
               router.replace('/login');
             }
