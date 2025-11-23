@@ -346,34 +346,58 @@ export default function AlbumDetailScreen() {
     return () => { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current); };
   }, [searchQuery, locationModalVisible, performSearch]);
 
+  // Progress value for smooth crossfade between collapsed badges and expanded editor
+  const transitionProgress = useRef(new Animated.Value(0)).current; // 0 collapsed, 1 expanded
+
+  const animateProgress = (target: number) => {
+    Animated.timing(transitionProgress, { toValue: target, duration: 260, easing: Easing.out(Easing.quad), useNativeDriver: false }).start();
+  };
+
   const toggleSheet = (toExpanded?: boolean) => {
     const target = (typeof toExpanded === 'boolean') ? (toExpanded ? expandedHeight : collapsedHeight) : (isExpandedRef.current ? collapsedHeight : expandedHeight);
     isExpandedRef.current = target === expandedHeight;
     setExpanded(isExpandedRef.current);
-    Animated.timing(sheetHeight, { toValue: target, duration: 240, easing: Easing.out(Easing.quad), useNativeDriver: false }).start();
+    Animated.timing(sheetHeight, { toValue: target, duration: 260, easing: Easing.out(Easing.quad), useNativeDriver: false }).start();
+    animateProgress(isExpandedRef.current ? 1 : 0);
   };
 
   // PanResponder for swipe up/down
+  // PanResponder adjusted: only engage when vertical gesture clearly dominates, so horizontal filter badge scrolling works
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 4,
-      onPanResponderGrant: () => {
-        sheetHeight.stopAnimation((val: number) => {
-          startHeightRef.current = val;
-        });
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_evt, g) => {
+        // Make it easier to engage vertical drag: lower thresholds.
+        const verticalDominant = Math.abs(g.dy) > Math.abs(g.dx) * 1.1;
+        return verticalDominant && Math.abs(g.dy) > 4;
       },
-      onPanResponderMove: (_, g) => {
-        let next = startHeightRef.current - g.dy; // dy negative when dragging up -> increase height
+      onPanResponderGrant: () => {
+        sheetHeight.stopAnimation((val: number) => { startHeightRef.current = val; });
+      },
+      onPanResponderMove: (_evt, g) => {
+        let next = startHeightRef.current - g.dy; // negative dy (drag up) increases height
         next = Math.max(collapsedHeight, Math.min(expandedHeight, next));
         sheetHeight.setValue(next);
+        const progress = (next - collapsedHeight) / (expandedHeight - collapsedHeight);
+        transitionProgress.setValue(progress);
       },
-      onPanResponderRelease: () => {
+      onPanResponderRelease: (_evt, g) => {
         sheetHeight.stopAnimation((val: number) => {
-          const midpoint = (collapsedHeight + expandedHeight) / 2;
-          toggleSheet(val > midpoint);
+          const ratio = (val - collapsedHeight) / (expandedHeight - collapsedHeight);
+          // Easier expansion/collapse: lower ratio threshold + velocity assist
+          const expandByDistance = ratio > 0.2; // previously midpoint (~0.5)
+          const expandByFlick = g.vy < -0.5; // quick upward flick
+          const collapseByFlick = g.vy > 0.6; // quick downward flick
+          if (collapseByFlick) {
+            toggleSheet(false);
+          } else if (expandByFlick || expandByDistance) {
+            toggleSheet(true);
+          } else {
+            toggleSheet(false);
+          }
         });
       },
+      onPanResponderTerminationRequest: () => false,
     })
   ).current;
 
@@ -393,12 +417,49 @@ export default function AlbumDetailScreen() {
           <View style={styles.bottomSheetGrab}>
             <View style={styles.grabIndicator} />
             <TouchableOpacity onPress={() => toggleSheet()} accessibilityRole="button" accessibilityLabel="Toggle filters" style={styles.filtersHeaderInline}>
-              <ThemedText style={styles.filtersTitle}>Filters</ThemedText>
-              <MaterialIcons name={isExpandedRef.current ? 'expand-less' : 'expand-more'} size={22} color={t.foreground} />
+              <ThemedText style={styles.filtersTitle}>{expanded ? 'Edit filters' : 'Active filters'}</ThemedText>
+              <MaterialIcons name={expanded ? 'expand-less' : 'expand-more'} size={22} color={t.foreground} />
             </TouchableOpacity>
           </View>
           <View style={styles.sheetContent}>
-            <ThemedText style={styles.filtersHeading}>Edit Filters:</ThemedText>
+            {/* Collapsed badges horizontal list (only visible when collapsed) */}
+            <Animated.View
+              pointerEvents={expanded ? 'none' : 'auto'}
+              style={{
+                opacity: transitionProgress.interpolate({ inputRange: [0, 0.25], outputRange: [1, 0] }),
+                transform: [{ translateY: transitionProgress.interpolate({ inputRange: [0,1], outputRange: [0,-12] }) }]
+              }}
+            >
+              {!expanded && (
+                <FlatList
+                  horizontal
+                  data={( () => {
+                    const arr: { key: string; label: string; icon: keyof typeof MaterialIcons.glyphMap }[] = [];
+                    arr.push({ key: 'media', label: activeTab === 'all' ? 'All' : activeTab.charAt(0).toUpperCase() + activeTab.slice(1), icon: activeTab === 'video' ? 'videocam' : activeTab === 'picture' ? 'photo' : 'insert-drive-file' });
+                    if (selectedDate) arr.push({ key: 'date', label: selectedDate.toLocaleDateString(), icon: 'calendar-today' });
+                    if (location) arr.push({ key: 'loc', label: location, icon: 'location-on' });
+                    selectedPeople.forEach((p, i) => arr.push({ key: `p-${i}`, label: p, icon: 'person' }));
+                    selectedTags.forEach((t, i) => arr.push({ key: `t-${i}`, label: t, icon: 'sell' }));
+                    return arr;
+                  })()}
+                  keyExtractor={(item) => item.key}
+                  renderItem={({ item }) => (
+                    <View style={styles.filterBadgeCollapsed}>
+                      <MaterialIcons name={item.icon} size={16} color="#555" style={{ marginRight: 6 }} />
+                      <ThemedText style={styles.filterBadgeCollapsedText}>{item.label}</ThemedText>
+                    </View>
+                  )}
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.collapsedBadgeRow}
+                />
+              )}
+            </Animated.View>
+            <Animated.View
+              pointerEvents={expanded ? 'auto' : 'none'}
+              style={{
+                opacity: transitionProgress.interpolate({ inputRange: [0, 0.15, 1], outputRange: [0, 0.3, 1] })
+              }}
+            >
             {/* Segmented tabs */}
             <View style={styles.segmentedContainer}>
               {['all','video','picture'].map(tab => {
@@ -421,7 +482,7 @@ export default function AlbumDetailScreen() {
                 {/* Date input */}
                 <TouchableOpacity
                   onPress={() => setShowDatePicker(true)}
-                  style={styles.inputField}
+                  style={[styles.inputField, styles.inputFieldSpaced]}
                   accessibilityRole="button"
                   accessibilityLabel="Pick a date"
                 >
@@ -444,7 +505,7 @@ export default function AlbumDetailScreen() {
                 {/* Location picker trigger */}
                 <TouchableOpacity
                   onPress={() => { setLocationModalVisible(true); handlePickLocation(); }}
-                  style={styles.inputField}
+                  style={[styles.inputField, styles.inputFieldSpaced]}
                   accessibilityRole="button"
                   accessibilityLabel={location ? 'Location selected' : 'Open location picker'}
                 >
@@ -494,6 +555,7 @@ export default function AlbumDetailScreen() {
                 </View>
               </>
             )}
+            </Animated.View>
           </View>
         </Animated.View>
       )}
@@ -670,6 +732,26 @@ const styles = StyleSheet.create({
     borderColor: '#e0e0e0',
   },
   filterBadgeText: { fontSize: 12, fontWeight: '500' },
+  // Collapsed summary badge row & badges
+  collapsedBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingRight: 8,
+    gap: 8,
+  },
+  filterBadgeCollapsed: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f5f5f5',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e0e0e0',
+    maxWidth: '100%',
+    marginRight: 8,
+  },
+  filterBadgeCollapsedText: { fontSize: 12, fontWeight: '500', color: '#222', flexShrink: 1 },
   galleryContent: { paddingBottom: 40 },
   // New filter UI styles
   sectionRow: {
@@ -770,6 +852,7 @@ const styles = StyleSheet.create({
   segmentButtonText: { fontSize: 14, fontWeight: '500', textTransform: 'capitalize', color: '#222' },
   segmentButtonTextActive: { color: '#000', fontWeight: '600' },
   inputField: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12, borderWidth: 1, borderColor: '#e2e2e2' },
+  inputFieldSpaced: { marginTop: 12 },
   inputIcon: { marginRight: 10 },
   inputPlaceholder: { fontSize: 14, color: '#444', fontWeight: '500' },
   textInputInner: { flex: 1, fontSize: 14, color: '#111', padding: 0 },
