@@ -1,3 +1,4 @@
+import { typography } from '@/constants/design-tokens';
 import { StyleSheet, Text, type TextProps } from "react-native";
 
 import { useThemeColor } from "@/hooks/use-theme-color";
@@ -37,24 +38,31 @@ const styles = StyleSheet.create({
   default: {
     fontSize: 16,
     lineHeight: 24,
+    fontFamily: typography.fontSansRegular,
+    letterSpacing: typography.trackingNormal * 16,
   },
   defaultSemiBold: {
     fontSize: 16,
     lineHeight: 24,
-    fontWeight: "600",
+    fontFamily: typography.fontSansSemiBold,
+    letterSpacing: typography.trackingNormal * 16,
   },
   title: {
     fontSize: 32,
     lineHeight: 34,
-    fontFamily: "InstrumentSerif_400Regular",
+    fontFamily: typography.fontSansSemiBold,
+    letterSpacing: typography.trackingNormal * 32,
   },
   subtitle: {
     fontSize: 20,
-    fontFamily: "InstrumentSerif_400Regular",
+    fontFamily: typography.fontSansMedium,
+    letterSpacing: typography.trackingNormal * 20,
   },
   link: {
     lineHeight: 30,
     fontSize: 16,
-    color: "#0a7ea4",
+    color: '#7033ff', // updated to primary token color
+    fontFamily: typography.fontSansSemiBold,
+    letterSpacing: typography.trackingNormal * 16,
   },
 });

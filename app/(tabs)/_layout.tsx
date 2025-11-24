@@ -1,48 +1,40 @@
-import { Tabs } from "expo-router";
+import { getDesignTokens, typography } from "@/constants/design-tokens";
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { Stack, useRouter } from "expo-router";
+import { TouchableOpacity, View } from 'react-native';
 
-import { HapticTab } from "@/components/haptic-tab";
-import { IconSymbol } from "@/components/ui/icon-symbol";
-import { Colors } from "@/constants/theme";
-import { useColorScheme } from "@/hooks/use-color-scheme";
-
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
-
+// Simplified layout: remove bottom tab bar and non-album routes (home/explore/camera).
+// Camera code retained in its file but not registered for navigation yet.
+export default function AlbumsOnlyLayout() {
+  // Provide tokens for header styling
+  const t = getDesignTokens('light');
+  const router = useRouter();
   return (
-    <Tabs
+    <Stack
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? "light"].tint,
-        headerShown: false,
-        tabBarButton: HapticTab,
+        headerShown: true,
+        headerShadowVisible: true,
+        headerStyle: { backgroundColor: t.background },
+        headerTitleStyle: { fontFamily: typography.fontSansSemiBold, fontSize: 20 },
+        headerTintColor: t.foreground,
       }}
     >
-      <Tabs.Screen
-        name="index"
+      <Stack.Screen
+        name="albums"
         options={{
-          title: "Home",
-          tabBarIcon: ({ color }) => (
-            <IconSymbol size={28} name="house.fill" color={color} />
+          title: 'Folio',
+          headerRight: () => (
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <TouchableOpacity accessibilityLabel="Profile" accessibilityRole="button" onPress={() => router.push('/settings')} style={{ paddingHorizontal: 4, paddingVertical: 4 }}>
+                <MaterialIcons name="person" size={24} color={t.foreground} />
+              </TouchableOpacity>
+              <TouchableOpacity accessibilityLabel="Settings" accessibilityRole="button" onPress={() => router.push('/settings')} style={{ paddingHorizontal: 4, paddingVertical: 4 }}>
+                <MaterialIcons name="settings" size={24} color={t.foreground} />
+              </TouchableOpacity>
+            </View>
           ),
         }}
       />
-      <Tabs.Screen
-        name="explore"
-        options={{
-          title: "Explore",
-          tabBarIcon: ({ color }) => (
-            <IconSymbol size={28} name="paperplane.fill" color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="camera"
-        options={{
-          title: "Camera",
-          tabBarIcon: ({ color }) => (
-            <IconSymbol size={28} name="camera.fill" color={color} />
-          ),
-        }}
-      />
-    </Tabs>
+    </Stack>
   );
 }
