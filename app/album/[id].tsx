@@ -24,15 +24,61 @@ interface Album {
 
 export default function AlbumDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  // router removed; inline overlay replaces navigation
   const [album, setAlbum] = useState<Album | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Inline expand overlay state
+  const [expandedImage, setExpandedImage] = useState<{ image: any; layout: { x: number; y: number; width: number; height: number } } | null>(null);
+  // Per-expanded-image metadata selections
+  const [expandedPeople, setExpandedPeople] = useState<string[]>([]);
+  const [expandedTags, setExpandedTags] = useState<string[]>([]);
+  const [savingMeta, setSavingMeta] = useState(false);
+  const metaSaveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const expandProgress = useRef(new Animated.Value(0)).current;
+  const window = Dimensions.get('window');
+  const overlayPanY = useRef(new Animated.Value(0)).current;
+  // Swipe-down (image region only) - keeps info panel scrollable by not capturing touches below the image.
+  const overlayPanResponder = React.useMemo(() => {
+    return PanResponder.create({
+      onStartShouldSetPanResponder: (evt) => {
+        if (!expandedImage) return false;
+        const y = evt.nativeEvent.pageY;
+        const top = styles.expandedImageTarget.top;
+        const bottom = top + styles.expandedImageTarget.height;
+        return y >= top && y <= bottom; // start only on image area
+      },
+      onMoveShouldSetPanResponder: (_e, g) => {
+        if (!expandedImage) return false;
+        return g.dy > 4 && Math.abs(g.dy) > Math.abs(g.dx); // vertical dominance
+      },
+      onPanResponderMove: (_e, g) => {
+        if (!expandedImage) return;
+        if (g.dy > 0) overlayPanY.setValue(g.dy);
+      },
+      onPanResponderRelease: (_e, g) => {
+        if (!expandedImage) return;
+        if (g.dy > 120 || g.vy > 0.9) {
+          Animated.timing(overlayPanY, { toValue: window.height, duration: 200, easing: Easing.out(Easing.quad), useNativeDriver: true }).start(() => {
+            Animated.timing(expandProgress, { toValue: 0, duration: 160, easing: Easing.out(Easing.quad), useNativeDriver: false }).start(() => {
+              setExpandedImage(null);
+              overlayPanY.setValue(0);
+            });
+          });
+        } else {
+          Animated.timing(overlayPanY, { toValue: 0, duration: 160, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
+        }
+      }
+    });
+  }, [expandedImage, overlayPanY, expandProgress, window.height]);
   // Attach feature removed
   const [hydrating, setHydrating] = useState(false);
   const [hydrateError, setHydrateError] = useState<string | null>(null);
   const insets = useSafeAreaInsets();
+  // Dynamic target height for info panel (screen height minus image target and bottom inset + spacing)
+  const infoTargetHeight = window.height - (styles.expandedImageTarget.top + styles.expandedImageTarget.height + insets.bottom + 12);
   
   const handleAddImage = async () => {
     if (!id) return;
@@ -218,6 +264,28 @@ export default function AlbumDetailScreen() {
 
   const t = getDesignTokens('light');
   console.log('[AlbumDetailScreen] primary token:', t.primary);
+
+  // Autosave tags & people when they change (debounced)
+  useEffect(() => {
+    if (!expandedImage?.image?._id) return;
+    if (metaSaveDebounceRef.current) clearTimeout(metaSaveDebounceRef.current);
+    metaSaveDebounceRef.current = setTimeout(async () => {
+      try {
+        setSavingMeta(true);
+        let token: string | null = null;
+        try { const raw = await AsyncStorage.getItem('session'); if (raw) { const s = JSON.parse(raw); token = s?.token || s?.accessToken || s?.jwt || s?.authorization || s?.user?.token || null; } } catch {}
+        const headers: Record<string,string> = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const imgId = expandedImage.image._id;
+        await fetch(`https://coding-bh7d.onrender.com/api/images/${imgId}`, { method:'PATCH', headers, body: JSON.stringify({ tags: expandedTags, people: expandedPeople }) });
+      } catch (e) {
+        console.log('[Autosave meta] failed', e);
+      } finally {
+        setSavingMeta(false);
+      }
+    }, 600);
+    return () => { if (metaSaveDebounceRef.current) clearTimeout(metaSaveDebounceRef.current); };
+  }, [expandedTags, expandedPeople, expandedImage]);
 
   // Animated placeholder component for loading state
   const LoadingImagePlaceholder = ({ active }: { active: boolean }) => {
@@ -406,7 +474,7 @@ export default function AlbumDetailScreen() {
 
   return (
     <ThemedView style={[styles.container, { backgroundColor: t.background }]}>      
-      <Stack.Screen options={{ title: album?.name || 'Album' }} />
+  <Stack.Screen options={{ title: album?.name || 'Album', headerShown: !expandedImage }} />
       {/* Attach feature removed */}
       {loading && (
         <View style={styles.centerWrap}><ActivityIndicator color={t.primary} /></View>
@@ -659,18 +727,35 @@ export default function AlbumDetailScreen() {
           data={album?.images ?? []}
           keyExtractor={(item, idx) => (item && typeof item === 'object' && (item as any)._id) ? String((item as any)._id) : String(idx)}
           contentContainerStyle={styles.galleryContent}
-            renderItem={({ item }) => {
-              if (item?.imagecode) {
-                return (
-                  <Image
-                    source={{ uri: `data:image/jpeg;base64,${item.imagecode}` }}
-                    style={styles.imageThumb}
-                    resizeMode="cover"
-                  />
-                );
-              }
-              return <LoadingImagePlaceholder active={hydrating || loading} />;
-            }}
+          renderItem={({ item }) => {
+            if (item?.imagecode) {
+              let ref: View | null = null;
+              const handlePress = () => {
+                if (!ref) return;
+                (ref as any).measure?.((x: number,y: number,width: number,height: number,pageX: number,pageY: number) => {
+                  setExpandedImage({ image: item, layout: { x: pageX, y: pageY, width, height } });
+                  setExpandedTags(Array.isArray((item as any).tags) ? (item as any).tags : []);
+                  setExpandedPeople(Array.isArray((item as any).people) ? (item as any).people : []);
+                  expandProgress.setValue(0);
+                  overlayPanY.setValue(0); // reset drag offset when opening
+                  Animated.timing(expandProgress,{ toValue: 1, duration: 260, easing: Easing.out(Easing.quad), useNativeDriver: false }).start();
+                });
+              };
+              return (
+                <View ref={(r) => { ref = r; }} style={{ width: '100%' }}>
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={handlePress}
+                    accessibilityRole='button'
+                    accessibilityLabel='Expand image'
+                  >
+                    <Image source={{ uri: `data:image/jpeg;base64,${item.imagecode}` }} style={styles.imageThumb} resizeMode='cover' />
+                  </TouchableOpacity>
+                </View>
+              );
+            }
+            return <LoadingImagePlaceholder active={hydrating || loading} />;
+          }}
           ListEmptyComponent={<ThemedText style={styles.emptyText}>No images yet.</ThemedText>}
         />
       )}
@@ -686,6 +771,141 @@ export default function AlbumDetailScreen() {
         <View style={[styles.uploadErrorBanner, { backgroundColor: t.destructive }]}>          
           <ThemedText style={styles.uploadErrorText}>{uploadError}</ThemedText>
         </View>
+      )}
+      {/* Inline expansion overlay (header -> image -> info card) */}
+      {expandedImage && (
+        <Animated.View {...overlayPanResponder.panHandlers} style={[StyleSheet.absoluteFill,{ zIndex:500, transform:[{ translateY: overlayPanY }] }]}>          
+          {/* White background fade */}
+          <Animated.View style={[StyleSheet.absoluteFill,{ backgroundColor: expandProgress.interpolate({ inputRange:[0,1], outputRange:['rgba(255,255,255,0)','rgba(255,255,255,1)'] }) }]} />
+          <Animated.View style={{ flex:1 }}>
+            {/* Header aligned with album navbar (safe area + 12) */}
+            <Animated.View style={[styles.expandedHeader,{ opacity: expandProgress }]}>              
+              <View style={styles.expandedHeaderLeft}>                
+                <MaterialIcons name='person' size={20} color='#111' style={{ marginRight:8 }} />
+                <ThemedText style={styles.expandedHeaderText}>Uploader</ThemedText>
+                {/* Delete button next to uploader */}
+                {!!expandedImage?.image?._id && (
+                  <TouchableOpacity
+                    style={styles.expandedDeleteButton}
+                    accessibilityRole='button'
+                    accessibilityLabel='Delete image'
+                    onPress={async () => {
+                      try {
+                        let token: string | null = null;
+                        try { const raw = await AsyncStorage.getItem('session'); if (raw) { const s = JSON.parse(raw); token = s?.token || s?.accessToken || s?.jwt || s?.authorization || s?.user?.token || null; } } catch {}
+                        const headers: Record<string,string> = { 'Content-Type': 'application/json' };
+                        if (token) headers['Authorization'] = `Bearer ${token}`;
+                        const imgId = expandedImage?.image?._id;
+                        if (!imgId) return;
+                        const resDel = await fetch(`https://coding-bh7d.onrender.com/api/images/${imgId}`, { method: 'DELETE', headers });
+                        if (!resDel.ok) {
+                          console.log('[Delete image] API responded', resDel.status);
+                        }
+                        // Remove locally
+                        setAlbum(prev => prev ? { ...prev, images: (prev.images||[]).filter((im:any) => (im?._id||im?.id) !== imgId) } : prev);
+                        // Refetch album to ensure backend reference removed (if backend doesn't cascade)
+                        try {
+                          const refreshed = await fetchAlbumById(String(id), token);
+                          if (refreshed?.images) setAlbum(refreshed);
+                        } catch (refErr) { console.log('[Delete image] album refetch failed', refErr); }
+                      } catch (e) {
+                        console.log('[Delete image] failed', e);
+                      } finally {
+                        // collapse overlay regardless
+                        Animated.timing(expandProgress,{ toValue:0, duration:160, easing:Easing.out(Easing.quad), useNativeDriver:false }).start(()=> setExpandedImage(null));
+                      }
+                    }}
+                  >
+                    <MaterialIcons name='delete' size={22} color='#c00' />
+                  </TouchableOpacity>
+                )}
+              </View>
+              <TouchableOpacity onPress={() => {
+                Animated.timing(expandProgress,{ toValue:0, duration:160, easing:Easing.out(Easing.quad), useNativeDriver:false }).start(()=> setExpandedImage(null));
+              }} accessibilityLabel='Close image'>
+                <MaterialIcons name='close' size={24} color='#111' />
+              </TouchableOpacity>
+            </Animated.View>
+            {/* Image with padding */}
+            <Animated.View
+              style={{
+                position:'absolute',
+                top: expandProgress.interpolate({ inputRange:[0,1], outputRange:[expandedImage.layout.y, styles.expandedImageTarget.top] }),
+                left: expandProgress.interpolate({ inputRange:[0,1], outputRange:[expandedImage.layout.x, styles.expandedImageTarget.left] }),
+                width: expandProgress.interpolate({ inputRange:[0,1], outputRange:[expandedImage.layout.width, styles.expandedImageTarget.width] }),
+                height: expandProgress.interpolate({ inputRange:[0,1], outputRange:[expandedImage.layout.height, styles.expandedImageTarget.height] }),
+              }}
+            >
+              <Image source={{ uri: `data:image/jpeg;base64,${expandedImage.image.imagecode}` }} style={styles.expandedImage} resizeMode='cover' />
+            </Animated.View>
+            {/* Info section (no rounded corners) with dynamic height & scroll */}
+            <Animated.View style={{
+              position:'absolute',
+              left:0,
+              right:0,
+              top: expandProgress.interpolate({ inputRange:[0,1], outputRange:[window.height, styles.expandedImageTarget.top + styles.expandedImageTarget.height + 12] }),
+              height: expandProgress.interpolate({ inputRange:[0,1], outputRange:[0, infoTargetHeight] }),
+              opacity: expandProgress.interpolate({ inputRange:[0,0.5,1], outputRange:[0,0,1] })
+            }}>
+              <View style={[styles.expandedInfoFlat,{ flex:1 }]}>                
+                <ScrollView style={{ flex:1 }} contentContainerStyle={{ paddingBottom: 32 + insets.bottom }} showsVerticalScrollIndicator={false}>
+                <TouchableOpacity style={styles.expandedDownloadButton} accessibilityRole='button' onPress={() => {/* TODO implement download (save to device) */}}>
+                  <MaterialIcons name='download' size={20} color='#fff' style={{ marginRight:8 }} />
+                  <ThemedText style={styles.expandedDownloadText}>Download</ThemedText>
+                </TouchableOpacity>
+                <View style={styles.expandedInfoBlock}>                  
+                  <ThemedText style={styles.expandedInfoTitle}>Information</ThemedText>
+                  <View style={styles.expandedInputRow}>                    
+                    <MaterialIcons name='calendar-today' size={18} color='#111' style={{ marginRight:8 }} />
+                    <ThemedText style={styles.expandedInputText}>Date</ThemedText>
+                  </View>
+                  <View style={styles.expandedInputRow}>                    
+                    <MaterialIcons name='location-on' size={20} color='#111' style={{ marginRight:8 }} />
+                    <ThemedText style={styles.expandedInputText}>Location</ThemedText>
+                  </View>
+                  {/* People selection */}
+                  <ThemedText style={styles.expandedMetaHeading}>People</ThemedText>
+                  <View style={styles.expandedChipRow}>
+                    {peoplePool.map((p) => {
+                      const active = expandedPeople.includes(p);
+                      return (
+                        <TouchableOpacity
+                          key={`exp-person-${p}`}
+                          onPress={() => setExpandedPeople(prev => active ? prev.filter(x => x!==p) : [...prev, p])}
+                          style={[styles.expandedPersonChip, active && styles.expandedPersonChipActive]}
+                        >
+                          <MaterialIcons name='person' size={16} color={active ? '#7033ff' : '#222'} style={{ marginRight:6 }} />
+                          <ThemedText style={[styles.expandedPersonChipText, active && styles.expandedPersonChipTextActive]}>{p}</ThemedText>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                  {/* Tags selection */}
+                  <ThemedText style={styles.expandedMetaHeading}>Tags</ThemedText>
+                  <View style={styles.expandedChipRow}>
+                    {tagPool.map(tag => {
+                      const active = expandedTags.includes(tag);
+                      return (
+                        <TouchableOpacity
+                          key={`exp-tag-${tag}`}
+                          onPress={() => setExpandedTags(prev => active ? prev.filter(x => x!==tag) : [...prev, tag])}
+                          style={[styles.expandedTagChip, active && styles.expandedTagChipActive]}
+                        >
+                          <ThemedText style={[styles.expandedTagChipText, active && styles.expandedTagChipTextActive]}>{tag}</ThemedText>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                  {/* Autosave indicator (optional) */}
+                  {!!expandedImage?.image?._id && savingMeta && (
+                    <ThemedText style={styles.expandedSavingIndicator}>Saving...</ThemedText>
+                  )}
+                </View>
+                </ScrollView>
+              </View>
+            </Animated.View>
+          </Animated.View>
+        </Animated.View>
       )}
       {/* Floating create image button */}
       {/* Animated FAB positioned above sheet */}
@@ -914,6 +1134,47 @@ const styles = StyleSheet.create({
   locationItemText: { fontSize: 13, color: '#222' },
   locationEmpty: { fontSize: 12, color: '#777', fontStyle: 'italic' },
   locationAttribution: { fontSize: 11, color: '#555', textAlign: 'center', opacity: 0.8 },
+  // Inline overlay styles
+  inlineInfoPanel: { backgroundColor:'#fff', padding:16, borderTopLeftRadius:20, borderTopRightRadius:20, minHeight: 260, shadowColor:'#000', shadowOpacity:0.15, shadowRadius:10, shadowOffset:{ width:0, height:-4 } },
+  inlineHeaderRow: { flexDirection:'row', alignItems:'center', justifyContent:'space-between' },
+  inlineUploaderBadge: { flexDirection:'row', alignItems:'center', backgroundColor:'#f3f3f3', paddingHorizontal:14, paddingVertical:10, borderRadius:28 },
+  inlineUploaderText: { fontSize:14, fontWeight:'600', color:'#222' },
+  inlineCloseButton: { padding:8, backgroundColor:'#f3f3f3', borderRadius:22 },
+  inlineDownloadButton: { flexDirection:'row', alignItems:'center', backgroundColor:'#111', paddingHorizontal:16, paddingVertical:12, borderRadius:10, alignSelf:'flex-start' },
+  inlineDownloadText: { color:'#fff', fontWeight:'600' },
+  // Expanded overlay styles (new layout)
+  expandedHeader: { position:'absolute', top:0, left:0, right:0, height:58, flexDirection:'row', alignItems:'center', paddingHorizontal:20, justifyContent:'space-between' },
+  expandedHeaderLeft: { flexDirection:'row', alignItems:'center' },
+  expandedHeaderText: { fontSize:16, fontWeight:'600', color:'#111' },
+  expandedDeleteButton: { padding:6, marginLeft:12 },
+  expandedInfoCard: { backgroundColor:'#fff', padding:20, borderTopLeftRadius:20, borderTopRightRadius:20, minHeight:280, borderWidth:1, borderColor:'#e5e5e5' },
+  expandedDownloadButton: { flexDirection:'row', alignItems:'center', justifyContent:'center', backgroundColor:'#111', paddingHorizontal:16, paddingVertical:14, borderRadius:12, width:'100%', marginBottom:16 },
+  expandedDownloadText: { color:'#fff', fontSize:14, fontWeight:'600' },
+  expandedInfoBlock: { },
+  expandedInfoTitle: { fontSize:16, fontWeight:'600', marginBottom:16 },
+  expandedInputRow: { flexDirection:'row', alignItems:'center', backgroundColor:'#f9f9f9', borderRadius:10, paddingHorizontal:14, paddingVertical:12, marginBottom:12, borderWidth:1, borderColor:'#e2e2e2' },
+  expandedInputText: { fontSize:14, fontWeight:'500', color:'#111' },
+  // New targets for image animation and flat info style (no rounded corners under image)
+  expandedImageTarget: { top:58, left:0, width:Dimensions.get('window').width, height:380 },
+  expandedImage: { width:'100%', height:'100%', paddingHorizontal:0 },
+  // Info section padding aligned with global screen padding (horizontal 20, top 16 like container)
+  expandedInfoFlat: { backgroundColor:'#fff', paddingHorizontal:20, paddingTop:16, paddingBottom:32 },
+  expandedInfoScroll: { maxHeight: Dimensions.get('window').height - (58 + 380 + 32), marginBottom:8 },
+  expandedInfoScrollContent: { paddingBottom: 32 },
+  // Meta selection styles inside expanded overlay
+  expandedMetaHeading: { fontSize:13, fontWeight:'600', marginTop:4, marginBottom:6 },
+  expandedChipRow: { flexDirection:'row', flexWrap:'wrap', gap:8, marginBottom:12 },
+  expandedPersonChip: { flexDirection:'row', alignItems:'center', backgroundColor:'#f5f5f5', paddingHorizontal:14, paddingVertical:10, borderRadius:20, borderWidth:1, borderColor:'#e0e0e0' },
+  expandedPersonChipActive: { borderColor:'#7033ff', backgroundColor:'#fff' },
+  expandedPersonChipText: { fontSize:13, fontWeight:'500', color:'#222' },
+  expandedPersonChipTextActive: { color:'#7033ff', fontWeight:'600' },
+  expandedTagChip: { backgroundColor:'#f5f5f5', paddingHorizontal:14, paddingVertical:10, borderRadius:20, borderWidth:1, borderColor:'#e0e0e0' },
+  expandedTagChipActive: { borderColor:'#7033ff', backgroundColor:'#fff' },
+  expandedTagChipText: { fontSize:13, fontWeight:'500', color:'#222' },
+  expandedTagChipTextActive: { color:'#7033ff', fontWeight:'600' },
+  expandedSaveMetaButton: { marginTop:4, backgroundColor:'#111', paddingVertical:12, borderRadius:10, alignItems:'center' },
+  expandedSaveMetaText: { color:'#fff', fontSize:14, fontWeight:'600' },
+  expandedSavingIndicator: { fontSize:12, fontWeight:'500', color:'#555', marginTop:4 },
 });
 
 async function requestLibraryPermission() {

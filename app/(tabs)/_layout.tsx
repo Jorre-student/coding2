@@ -24,12 +24,24 @@ export default function AlbumsOnlyLayout() {
         options={{
           title: 'Folio',
           headerRight: () => (
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <TouchableOpacity accessibilityLabel="Profile" accessibilityRole="button" onPress={() => router.push('/settings')} style={{ paddingHorizontal: 4, paddingVertical: 4 }}>
-                <MaterialIcons name="person" size={24} color={t.foreground} />
+            <View style={{ flexDirection: 'row', alignItems: 'center', paddingRight: 4 }}>
+              <TouchableOpacity
+                accessibilityLabel="Account"
+                accessibilityRole="button"
+                onPress={() => router.push('/account' as any)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={{ marginRight: 14, padding: 8, borderRadius: 24 }}
+              >
+                <MaterialIcons name="person" size={26} color={t.foreground} />
               </TouchableOpacity>
-              <TouchableOpacity accessibilityLabel="Settings" accessibilityRole="button" onPress={() => router.push('/settings')} style={{ paddingHorizontal: 4, paddingVertical: 4 }}>
-                <MaterialIcons name="settings" size={24} color={t.foreground} />
+              <TouchableOpacity
+                accessibilityLabel="Settings"
+                accessibilityRole="button"
+                onPress={() => router.push('/settings')}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={{ padding: 8, borderRadius: 24 }}
+              >
+                <MaterialIcons name="settings" size={26} color={t.foreground} />
               </TouchableOpacity>
             </View>
           ),
