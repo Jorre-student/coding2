@@ -35,6 +35,13 @@ export default function AlbumDetailScreen() {
   // Per-expanded-image metadata selections
   const [expandedPeople, setExpandedPeople] = useState<string[]>([]);
   const [expandedTags, setExpandedTags] = useState<string[]>([]);
+  // Date & location metadata for expanded image
+  const [expandedPickedDate, setExpandedPickedDate] = useState<Date | null>(null);
+  const [expandedDateOpen, setExpandedDateOpen] = useState(false);
+  const [expandedLocationLabel, setExpandedLocationLabel] = useState<string>('');
+  const [expandedLat, setExpandedLat] = useState<number | null>(null);
+  const [expandedLon, setExpandedLon] = useState<number | null>(null);
+  const [expandedEditingLocation, setExpandedEditingLocation] = useState(false);
   const [savingMeta, setSavingMeta] = useState(false);
   const metaSaveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const expandProgress = useRef(new Animated.Value(0)).current;
@@ -88,6 +95,7 @@ export default function AlbumDetailScreen() {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         base64: false,
+        exif: true,
         quality: 1,
         allowsEditing: false,
       });
@@ -106,7 +114,28 @@ export default function AlbumDetailScreen() {
         }
       } catch { /* ignore */ }
 
-      // Center-crop to square then resize to exactly 64x64
+      // Extract EXIF metadata (date + GPS) before manipulation
+      const exifMeta = extractExifMetadata(asset);
+      // Derive final picked date (EXIF created timestamp or fallback to now)
+      const finalPickedDateISO = exifMeta.pickedDateISO || new Date().toISOString();
+      // Use only picture EXIF location (no current-device fallback)
+      const finalLat: number | undefined = exifMeta.lat;
+      const finalLon: number | undefined = exifMeta.lon;
+      // If we have lat/lon from EXIF, resolve a friendly label using the same API used by filters (Nominatim)
+      let finalPlaceLabel: string | undefined;
+      if (finalLat != null && finalLon != null) {
+        try {
+          const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${encodeURIComponent(finalLat)}&lon=${encodeURIComponent(finalLon)}&addressdetails=1`;
+          const res = await fetch(url, { headers: NOMINATIM_HEADERS });
+          const j: any = await res.json();
+          const label = formatPlace(j);
+          if (label && typeof label === 'string') finalPlaceLabel = label;
+        } catch {
+          // leave undefined; we'll fall back to 'Unknown'
+        }
+      }
+
+  // Center-crop to square then resize to exactly 64x64
       const origW = asset.width || 0;
       const origH = asset.height || 0;
       let actions: ImageManipulator.Action[] = [];
@@ -154,6 +183,37 @@ export default function AlbumDetailScreen() {
         } catch (refetchErr) {
           console.log('[Album Upload] Refetch failed:', refetchErr);
         }
+      }
+
+  // Patch metadata (always send picked_date; send location only if present in EXIF)
+      try {
+        const imageId = response?.image?._id || response?.image?.id || (response?.album?.images?.length ? (response.album.images[response.album.images.length - 1]._id || response.album.images[response.album.images.length - 1].id) : null);
+        if (imageId) {
+          const patchBody: any = { picked_date: finalPickedDateISO };
+          if (finalLat != null && finalLon != null) {
+            patchBody.location = { lat: finalLat, lon: finalLon, placeLabel: finalPlaceLabel || 'Unknown' };
+          }
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          if (token) headers['Authorization'] = `Bearer ${token}`;
+          await fetch(`https://coding-bh7d.onrender.com/api/images/${imageId}`, { method: 'PATCH', headers, body: JSON.stringify(patchBody) });
+          // Auto-update local state once so UI reflects new metadata without a full reload
+          setAlbum(prev => {
+            if (!prev || !Array.isArray(prev.images)) return prev;
+            const imgs = prev.images.map((im: any) => {
+              const imId = (im && typeof im === 'object') ? (im._id || im.id) : null;
+              if (imId && imId === imageId) {
+                const next: any = { ...im };
+                if (patchBody.picked_date) next.picked_date = patchBody.picked_date;
+                if (patchBody.location) next.location = patchBody.location;
+                return next;
+              }
+              return im;
+            });
+            return { ...prev, images: imgs };
+          });
+        }
+      } catch (metaErr) {
+        console.log('[Album Upload] Metadata patch failed:', metaErr);
       }
       setUploading(false);
     } catch (e: any) {
@@ -204,7 +264,9 @@ export default function AlbumDetailScreen() {
         const hasCode = !!img.imagecode;
         const isIdOnly = typeof (img as any) === 'string';
         const hasIdNoCode = (img._id && !img.imagecode);
-        return isIdOnly || hasIdNoCode || !hasCode;
+        // Also hydrate if metadata fields missing (tags, people, picked_date, location)
+        const missingMeta = !(img as any).tags || !(img as any).people || typeof (img as any).picked_date === 'undefined' || typeof (img as any).location === 'undefined';
+        return isIdOnly || hasIdNoCode || !hasCode || missingMeta;
       });
       if (!needsHydration) return;
       setHydrating(true);
@@ -220,7 +282,7 @@ export default function AlbumDetailScreen() {
         } catch {}
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (token) headers['Authorization'] = `Bearer ${token}`;
-        const hydrated: { _id?: string; imagecode?: string }[] = [];
+        const hydrated: any[] = [];
         for (const entry of album.images) {
           if (!entry) continue;
           if (typeof entry === 'string') {
@@ -229,7 +291,15 @@ export default function AlbumDetailScreen() {
               const res = await fetch(`https://coding-bh7d.onrender.com/api/images/${imgId}`, { headers });
               let json: any = null; try { json = await res.json(); } catch {}
               if (res.ok && json) {
-                hydrated.push({ _id: json._id || json.id || imgId, imagecode: json.imagecode || json.base64 });
+                hydrated.push({
+                  _id: json._id || json.id || imgId,
+                  imagecode: json.imagecode || json.base64,
+                  tags: Array.isArray(json.tags) ? json.tags : [],
+                  people: Array.isArray(json.people) ? json.people : [],
+                  picked_date: typeof json.picked_date !== 'undefined' ? json.picked_date : null,
+                  // Preserve null vs undefined; undefined means truly missing (will trigger hydration again), null means present but empty
+                  location: json.location,
+                });
               } else {
                 hydrated.push({ _id: imgId });
               }
@@ -242,7 +312,14 @@ export default function AlbumDetailScreen() {
               const res = await fetch(`https://coding-bh7d.onrender.com/api/images/${imgId}`, { headers });
               let json: any = null; try { json = await res.json(); } catch {}
               if (res.ok && json) {
-                hydrated.push({ _id: json._id || json.id || imgId, imagecode: json.imagecode || json.base64 });
+                hydrated.push({
+                  _id: json._id || json.id || imgId,
+                  imagecode: json.imagecode || json.base64,
+                  tags: Array.isArray(json.tags) ? json.tags : [],
+                  people: Array.isArray(json.people) ? json.people : [],
+                  picked_date: typeof json.picked_date !== 'undefined' ? json.picked_date : null,
+                  location: json.location,
+                });
               } else {
                 hydrated.push({ _id: imgId });
               }
@@ -250,7 +327,14 @@ export default function AlbumDetailScreen() {
               hydrated.push({ _id: imgId });
             }
           } else {
-            hydrated.push(entry);
+            // Ensure arrays exist
+            const obj: any = { ...entry };
+            if (!Array.isArray(obj.tags)) obj.tags = [];
+            if (!Array.isArray(obj.people)) obj.people = [];
+            // Prevent endless hydration loop: normalize undefined meta fields to null sentinel
+            if (typeof obj.picked_date === 'undefined') obj.picked_date = null;
+            if (typeof obj.location === 'undefined') obj.location = null; // null means intentionally empty
+            hydrated.push(obj);
           }
         }
         setAlbum(prev => prev ? { ...prev, images: hydrated } : prev);
@@ -262,10 +346,9 @@ export default function AlbumDetailScreen() {
     })();
   }, [album?.images]);
 
-  const t = getDesignTokens('light');
-  console.log('[AlbumDetailScreen] primary token:', t.primary);
+  const t = React.useMemo(() => getDesignTokens('light'), []);
 
-  // Autosave tags & people when they change (debounced)
+  // Autosave tags, people, date & location when they change (debounced)
   useEffect(() => {
     if (!expandedImage?.image?._id) return;
     if (metaSaveDebounceRef.current) clearTimeout(metaSaveDebounceRef.current);
@@ -277,7 +360,22 @@ export default function AlbumDetailScreen() {
         const headers: Record<string,string> = { 'Content-Type': 'application/json' };
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const imgId = expandedImage.image._id;
-        await fetch(`https://coding-bh7d.onrender.com/api/images/${imgId}`, { method:'PATCH', headers, body: JSON.stringify({ tags: expandedTags, people: expandedPeople }) });
+        const body: any = { tags: expandedTags, people: expandedPeople };
+        if (expandedPickedDate) body.picked_date = expandedPickedDate.toISOString();
+        if (expandedLat != null && expandedLon != null) body.location = { lat: expandedLat, lon: expandedLon, placeLabel: expandedLocationLabel || 'Unknown' };
+        const res = await fetch(`https://coding-bh7d.onrender.com/api/images/${imgId}`, { method:'PATCH', headers, body: JSON.stringify(body) });
+        // Update local album state for immediate reflect
+        if (res.ok) {
+          setAlbum(prev => {
+            if (!prev) return prev;
+            const imgs = (prev.images||[]).map((im:any) => {
+              const idMatch = (im._id || im.id) === imgId;
+              if (!idMatch) return im;
+              return { ...im, tags: body.tags, people: body.people, picked_date: body.picked_date || im.picked_date, location: body.location || im.location };
+            });
+            return { ...prev, images: imgs };
+          });
+        }
       } catch (e) {
         console.log('[Autosave meta] failed', e);
       } finally {
@@ -285,7 +383,7 @@ export default function AlbumDetailScreen() {
       }
     }, 600);
     return () => { if (metaSaveDebounceRef.current) clearTimeout(metaSaveDebounceRef.current); };
-  }, [expandedTags, expandedPeople, expandedImage]);
+  }, [expandedTags, expandedPeople, expandedPickedDate, expandedLat, expandedLon, expandedLocationLabel, expandedImage]);
 
   // Animated placeholder component for loading state
   const LoadingImagePlaceholder = ({ active }: { active: boolean }) => {
@@ -416,6 +514,80 @@ export default function AlbumDetailScreen() {
     }, 300);
     return () => { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current); };
   }, [searchQuery, locationModalVisible, performSearch]);
+
+  // --- EXIF helpers for upload metadata ---
+  const parseDMS = (value: any): number | null => {
+    if (value == null) return null;
+    if (typeof value === 'number') return value;
+    if (Array.isArray(value)) {
+      // [deg, min, sec]
+      const [d, m = 0, s = 0] = value;
+      if (typeof d !== 'number') return null;
+      return d + m / 60 + s / 3600;
+    }
+    if (typeof value === 'string') {
+      // formats like "51/1,13/1,2151/100" or "51,13,21.51"
+      const parts = value.split(/[ ,]+/).map((p) => {
+        if (p.includes('/')) { const [n, d] = p.split('/').map(Number); return d ? n / d : Number(p); }
+        return Number(p);
+      }).filter((n) => !Number.isNaN(n));
+      if (parts.length) {
+        const [d, m = 0, s = 0] = parts;
+        return d + m / 60 + s / 3600;
+      }
+    }
+    return null;
+  };
+
+  const extractExifMetadata = (asset: any): { pickedDateISO?: string; lat?: number; lon?: number } => {
+    const out: { pickedDateISO?: string; lat?: number; lon?: number } = {};
+    const exif = asset?.exif || asset?.EXIF || null;
+    if (exif) {
+      // Date
+      const dt = exif.DateTimeOriginal || exif.DateTime || exif.DateTimeDigitized || exif.dateTimeOriginal || exif.CreationDate || exif.CreateDate;
+      if (typeof dt === 'string') {
+        // Convert "YYYY:MM:DD HH:mm:ss" to ISO
+        const iso = new Date(dt.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')).toISOString();
+        out.pickedDateISO = iso;
+      }
+      // GPS (varies by platform/vendor)
+      let lat: number | null = null; let lon: number | null = null;
+      // iOS often nests in {GPS}
+      const gps = exif['{GPS}'] || exif.GPS || null;
+      if (gps && (gps.Latitude != null && gps.Longitude != null)) {
+        lat = parseDMS(gps.Latitude);
+        lon = parseDMS(gps.Longitude);
+        if (gps.LatitudeRef === 'S') lat = lat != null ? -Math.abs(lat) : lat;
+        if (gps.LongitudeRef === 'W') lon = lon != null ? -Math.abs(lon) : lon;
+      }
+      // Android/others flat keys
+      if (lat == null && (exif.GPSLatitude != null && exif.GPSLongitude != null)) {
+        lat = parseDMS(exif.GPSLatitude);
+        lon = parseDMS(exif.GPSLongitude);
+        if (exif.GPSLatitudeRef === 'S') lat = lat != null ? -Math.abs(lat) : lat;
+        if (exif.GPSLongitudeRef === 'W') lon = lon != null ? -Math.abs(lon) : lon;
+      }
+      // Some devices expose decimal degrees as lowercase keys or generic names
+      if (lat == null && (exif.latitude != null || exif.Latitude != null)) {
+        const v = exif.latitude ?? exif.Latitude;
+        lat = typeof v === 'string' ? parseFloat(v) : (typeof v === 'number' ? v : parseDMS(v));
+      }
+      if (lon == null && (exif.longitude != null || exif.Longitude != null || exif.lng != null)) {
+        const v = exif.longitude ?? exif.Longitude ?? exif.lng;
+        lon = typeof v === 'string' ? parseFloat(v) : (typeof v === 'number' ? v : parseDMS(v));
+      }
+      // Combined position string e.g. "51.23, 4.41"
+      if ((lat == null || lon == null) && typeof exif.GPSPosition === 'string') {
+        const parts = exif.GPSPosition.split(/[;,\s]+/).map((p: string) => parseFloat(p)).filter((n: number) => !Number.isNaN(n));
+        if (parts.length >= 2) { lat = lat ?? parts[0]; lon = lon ?? parts[1]; }
+      }
+      // Validate ranges
+      if (typeof lat === 'number' && (lat < -90 || lat > 90)) lat = null;
+      if (typeof lon === 'number' && (lon < -180 || lon > 180)) lon = null;
+      if (lat != null && lon != null) { out.lat = lat; out.lon = lon; }
+    }
+    return out;
+  };
 
   // Progress value for smooth crossfade between collapsed badges and expanded editor
   const transitionProgress = useRef(new Animated.Value(0)).current; // 0 collapsed, 1 expanded
@@ -731,15 +903,39 @@ export default function AlbumDetailScreen() {
             if (item?.imagecode) {
               let ref: View | null = null;
               const handlePress = () => {
-                if (!ref) return;
-                (ref as any).measure?.((x: number,y: number,width: number,height: number,pageX: number,pageY: number) => {
-                  setExpandedImage({ image: item, layout: { x: pageX, y: pageY, width, height } });
+                const finalize = (layout: { x:number;y:number;width:number;height:number }) => {
+                  setExpandedImage({ image: item, layout });
                   setExpandedTags(Array.isArray((item as any).tags) ? (item as any).tags : []);
                   setExpandedPeople(Array.isArray((item as any).people) ? (item as any).people : []);
+                  const pickedRaw = (item as any).picked_date;
+                  setExpandedPickedDate(pickedRaw ? new Date(pickedRaw) : null);
+                  const loc = (item as any).location;
+                  if (loc && (loc.lat != null) && (loc.lon != null)) {
+                    setExpandedLat(Number(loc.lat));
+                    setExpandedLon(Number(loc.lon));
+                    setExpandedLocationLabel(String(loc.placeLabel || ''));
+                  } else {
+                    setExpandedLat(null); setExpandedLon(null); setExpandedLocationLabel('');
+                  }
                   expandProgress.setValue(0);
-                  overlayPanY.setValue(0); // reset drag offset when opening
+                  overlayPanY.setValue(0);
                   Animated.timing(expandProgress,{ toValue: 1, duration: 260, easing: Easing.out(Easing.quad), useNativeDriver: false }).start();
-                });
+                };
+                try {
+                  if (ref && (ref as any).measureInWindow) {
+                    (ref as any).measureInWindow((x:number,y:number,width:number,height:number) => {
+                      finalize({ x,y,width,height });
+                    });
+                    return;
+                  }
+                  if (ref && (ref as any).measure) {
+                    (ref as any).measure((x:number,y:number,width:number,height:number,pageX:number,pageY:number) => {
+                      finalize({ x: pageX ?? x, y: pageY ?? y, width, height });
+                    });
+                    return;
+                  }
+                } catch {}
+                finalize({ x: styles.expandedImageTarget.left, y: styles.expandedImageTarget.top, width: styles.expandedImageTarget.width, height: styles.expandedImageTarget.height });
               };
               return (
                 <View ref={(r) => { ref = r; }} style={{ width: '100%' }}>
@@ -855,14 +1051,72 @@ export default function AlbumDetailScreen() {
                 </TouchableOpacity>
                 <View style={styles.expandedInfoBlock}>                  
                   <ThemedText style={styles.expandedInfoTitle}>Information</ThemedText>
-                  <View style={styles.expandedInputRow}>                    
+                  {/* Date editable field */}
+                  <TouchableOpacity style={styles.expandedInputRow} onPress={() => setExpandedDateOpen(true)} accessibilityRole='button' accessibilityLabel='Edit date'>                    
                     <MaterialIcons name='calendar-today' size={18} color='#111' style={{ marginRight:8 }} />
-                    <ThemedText style={styles.expandedInputText}>Date</ThemedText>
-                  </View>
-                  <View style={styles.expandedInputRow}>                    
+                    <ThemedText style={styles.expandedInputText}>{expandedPickedDate ? expandedPickedDate.toLocaleDateString() : 'Add date'}</ThemedText>
+                  </TouchableOpacity>
+                  <DatePickerModal
+                    locale='en'
+                    mode='single'
+                    visible={expandedDateOpen}
+                    onDismiss={() => setExpandedDateOpen(false)}
+                    date={expandedPickedDate || undefined}
+                    onConfirm={({ date }) => { setExpandedPickedDate(date || null); setExpandedDateOpen(false); }}
+                    saveLabel='Save'
+                    uppercase={false}
+                    animationType='slide'
+                  />
+                  {/* Location editable field */}
+                  <TouchableOpacity
+                    style={styles.expandedInputRow}
+                    onPress={() => setExpandedEditingLocation(v => !v)}
+                    accessibilityRole='button'
+                    accessibilityLabel='Edit location'
+                  >                    
                     <MaterialIcons name='location-on' size={20} color='#111' style={{ marginRight:8 }} />
-                    <ThemedText style={styles.expandedInputText}>Location</ThemedText>
-                  </View>
+                    {expandedEditingLocation ? (
+                      <TextInput
+                        style={styles.expandedInputText}
+                        placeholder='Enter location label'
+                        value={expandedLocationLabel}
+                        onChangeText={setExpandedLocationLabel}
+                        autoFocus
+                        placeholderTextColor='#777'
+                      />
+                    ) : (
+                      <ThemedText style={styles.expandedInputText}>{expandedLocationLabel || 'Add location'}</ThemedText>
+                    )}
+                  </TouchableOpacity>
+                  {expandedEditingLocation && (
+                    <TouchableOpacity onPress={() => {
+                      // Optionally exit edit mode
+                      setExpandedEditingLocation(false);
+                    }} style={[styles.expandedTagChip,{ alignSelf:'flex-start', marginBottom:12 }]} accessibilityRole='button'>
+                      <MaterialIcons name='check' size={16} color='#222' style={{ marginRight:6 }} />
+                      <ThemedText style={styles.expandedTagChipText}>Done</ThemedText>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity onPress={async () => {
+                    try {
+                      const { status } = await Location.requestForegroundPermissionsAsync();
+                      if (status !== 'granted') return;
+                      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+                      setExpandedLat(pos.coords.latitude);
+                      setExpandedLon(pos.coords.longitude);
+                      let label = `${pos.coords.latitude.toFixed(3)}, ${pos.coords.longitude.toFixed(3)}`;
+                      try {
+                        const geo = await Location.reverseGeocodeAsync({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
+                        if (geo && geo[0]) label = formatPlace({ address: geo[0] });
+                      } catch {}
+                      setExpandedLocationLabel(label);
+                    } catch (e) {
+                      console.log('[Expanded Location] failed', e);
+                    }
+                  }} style={[styles.expandedTagChip, { alignSelf: 'flex-start', marginBottom: 12 }]} accessibilityRole='button' accessibilityLabel='Use current location'>
+                    <MaterialIcons name='my-location' size={16} color='#222' style={{ marginRight:6 }} />
+                    <ThemedText style={styles.expandedTagChipText}>Use current location</ThemedText>
+                  </TouchableOpacity>
                   {/* People selection */}
                   <ThemedText style={styles.expandedMetaHeading}>People</ThemedText>
                   <View style={styles.expandedChipRow}>
