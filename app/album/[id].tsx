@@ -7,10 +7,11 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // DateTimePicker removed (range handled by react-native-paper-dates)
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
-import * as Location from 'expo-location';
+// expo-location used inside LocationPicker component
+import LocationPicker from '@/components/ui/location-picker';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, Image, Modal, PanResponder, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, Image, PanResponder, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
 import { DatePickerModal } from 'react-native-paper-dates';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // Animated Touchable for FAB (defined after all imports to satisfy lint rule)
@@ -422,12 +423,7 @@ export default function AlbumDetailScreen() {
   const [dateRangeOpen, setDateRangeOpen] = useState(false);
   const [location, setLocation] = useState<string | null>(null);
   const [locationModalVisible, setLocationModalVisible] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [nearby, setNearby] = useState<string[]>([]);
-  const [searchResults, setSearchResults] = useState<string[]>([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [locationLoading, setLocationLoading] = useState(false);
-  const [locationError, setLocationError] = useState<string | null>(null);
+  // Location picker state now handled by shared component; keep only selected label and visibility
   const peoplePool = ['You', 'Alice', 'Bob', 'Charlie'];
   const tagPool = ['Vacation', 'Family', 'Work', 'Favorites'];
   const [selectedPeople, setSelectedPeople] = useState<string[]>([]);
@@ -439,18 +435,7 @@ export default function AlbumDetailScreen() {
     'Referer': 'https://folio-app.local'
   }), []);
 
-  const fetchNearbyLocations = async (lat: number, lon: number) => {
-    try {
-      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=6&addressdetails=1&q=${encodeURIComponent(lat.toFixed(3)+','+lon.toFixed(3))}`;
-      const res = await fetch(url, { headers: NOMINATIM_HEADERS });
-      const json: any[] = await res.json();
-      const names = json.map(j => formatPlace(j)).filter(Boolean);
-      const unique = names.filter((v,i,a) => a.indexOf(v) === i);
-      setNearby(unique.slice(0,6));
-    } catch {
-      setNearby([]);
-    }
-  };
+  // Nearby helper handled inside LocationPicker component
 
   // Helper to produce a concise place label from Nominatim result or reverse geocode address object
   const formatPlace = (entry: any): string => {
@@ -465,55 +450,10 @@ export default function AlbumDetailScreen() {
     if (label.length > 40) label = label.slice(0, 37) + '…';
     return label;
   };
-  const handlePickLocation = async () => {
-    setLocationError(null);
-    setLocationLoading(true);
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') throw new Error('Permission denied');
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      let label = `${pos.coords.latitude.toFixed(3)}, ${pos.coords.longitude.toFixed(3)}`;
-      try {
-        const geo = await Location.reverseGeocodeAsync({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
-        if (geo && geo[0]) {
-          label = formatPlace({ address: geo[0] });
-        }
-      } catch {}
-      setLocation(label);
-      fetchNearbyLocations(pos.coords.latitude, pos.coords.longitude);
-    } catch (e: any) {
-      setLocationError(e?.message || 'Location unavailable');
-    } finally {
-      setLocationLoading(false);
-    }
-  };
+  // Legacy inline location helpers removed; unified via LocationPicker component
 
   // Debounced search
-  const performSearch = React.useCallback(async (q: string) => {
-    if (!q.trim()) { setSearchResults([]); return; }
-    setSearchLoading(true);
-    try {
-      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=8&addressdetails=1&q=${encodeURIComponent(q.trim())}`;
-      const res = await fetch(url, { headers: NOMINATIM_HEADERS });
-      const json: any[] = await res.json();
-      const names = json.map(j => formatPlace(j)).filter(Boolean);
-      const unique = names.filter((v,i,a) => a.indexOf(v) === i);
-      setSearchResults(unique);
-    } catch {
-      setSearchResults([]);
-    } finally {
-      setSearchLoading(false);
-    }
-  }, [NOMINATIM_HEADERS]);
-  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    if (!locationModalVisible) return; // only when modal open
-    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-    searchDebounceRef.current = setTimeout(() => {
-      performSearch(searchQuery);
-    }, 300);
-    return () => { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current); };
-  }, [searchQuery, locationModalVisible, performSearch]);
+  // Legacy search handlers removed; unified via LocationPicker component
 
   // --- EXIF helpers for upload metadata ---
   const parseDMS = (value: any): number | null => {
@@ -773,18 +713,19 @@ export default function AlbumDetailScreen() {
                   uppercase={false}
                   animationType="slide"
                 />
-                {/* Location picker trigger */}
-                <TouchableOpacity
-                  onPress={() => { setLocationModalVisible(true); handlePickLocation(); }}
-                  style={[styles.inputField, styles.inputFieldSpaced]}
-                  accessibilityRole="button"
-                  accessibilityLabel={location ? 'Location selected' : 'Open location picker'}
-                >
-                  <MaterialIcons name="location-on" size={20} color="#444" style={styles.inputIcon} />
-                  <ThemedText style={styles.inputPlaceholder}>
-                    {location ? location : (locationLoading ? 'Fetching...' : 'Add a location')}
-                  </ThemedText>
-                </TouchableOpacity>
+                {/* Location picker trigger (shared component) */}
+                <View style={styles.inputFieldSpaced}>
+                  <LocationPicker
+                    value={location}
+                    onChange={(label, coords) => {
+                      setLocation(label);
+                      // Optional: could store coords for future filter usage
+                    }}
+                    visible={locationModalVisible}
+                    onVisibleChange={setLocationModalVisible}
+                    triggerLabel="Add a location"
+                  />
+                </View>
                 {/* People */}
                 <ThemedText style={styles.sectionHeading}>People</ThemedText>
                 <View style={styles.chipRow}>
@@ -830,70 +771,7 @@ export default function AlbumDetailScreen() {
           </View>
         </Animated.View>
       )}
-        {locationModalVisible && (
-          <Modal visible animationType="slide" transparent onRequestClose={() => setLocationModalVisible(false)}>
-            <View style={styles.locationModalBackdrop}>
-              <View style={styles.locationModal}>
-                <View style={styles.locationModalHeader}>
-                  <ThemedText style={styles.locationModalTitle}>Add Location</ThemedText>
-                  <TouchableOpacity onPress={() => setLocationModalVisible(false)} accessibilityRole="button" accessibilityLabel="Close location picker">
-                    <MaterialIcons name="close" size={24} color="#222" />
-                  </TouchableOpacity>
-                </View>
-                <View style={styles.searchRow}>
-                  <MaterialIcons name="search" size={20} color="#555" style={{ marginRight: 6 }} />
-                  <TextInput
-                    placeholder="Zoek locaties"
-                    placeholderTextColor="#777"
-                    style={styles.searchInput}
-                    value={searchQuery}
-                    onChangeText={setSearchQuery}
-                    autoCorrect={false}
-                    autoCapitalize="none"
-                    returnKeyType="search"
-                  />
-                  {searchLoading && <ActivityIndicator size="small" color="#555" />}
-                </View>
-                <ScrollView style={styles.locationScroll} keyboardShouldPersistTaps="handled">
-                  <View style={styles.locationSection}>
-                    <ThemedText style={styles.locationSectionTitle}>Your Location</ThemedText>
-                    <TouchableOpacity style={styles.locationItem} onPress={() => { if (location) { setLocationModalVisible(false); } else { handlePickLocation(); } }}>
-                      {locationLoading ? <ActivityIndicator size="small" color="#444" /> : (
-                        <ThemedText style={styles.locationItemText}>{location || (locationError || 'Tap to fetch current location')}</ThemedText>
-                      )}
-                    </TouchableOpacity>
-                  </View>
-                  {!!nearby.length && (
-                    <View style={styles.locationSection}>
-                      <ThemedText style={styles.locationSectionTitle}>Nearby</ThemedText>
-                      {nearby.map((n, idx) => (
-                          <TouchableOpacity key={`nearby-${idx}`} style={styles.locationItem} onPress={() => { setLocation(n); setLocationModalVisible(false); }}>
-                            <ThemedText style={styles.locationItemText}>{n}</ThemedText>
-                          </TouchableOpacity>
-                        ))}
-                    </View>
-                  )}
-                  {!!searchResults.length && (
-                    <View style={styles.locationSection}>
-                      <ThemedText style={styles.locationSectionTitle}>Search Results</ThemedText>
-                      {searchResults.map((r, idx) => (
-                        <TouchableOpacity key={`search-${idx}`} style={styles.locationItem} onPress={() => { setLocation(r); setLocationModalVisible(false); }}>
-                          <ThemedText style={styles.locationItemText}>{r}</ThemedText>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  )}
-                  {!searchResults.length && searchQuery.trim().length > 0 && (
-                    <View style={styles.locationSection}><ThemedText style={styles.locationEmpty}>Geen resultaten</ThemedText></View>
-                  )}
-                  <View style={[styles.locationSection, { paddingBottom: 28 }]}> 
-                    <ThemedText style={styles.locationAttribution}>Data © OpenStreetMap-bijdragers (Nominatim)</ThemedText>
-                  </View>
-                </ScrollView>
-              </View>
-            </View>
-          </Modal>
-        )}
+        {/* Shared modal handled by LocationPicker; inline legacy modal removed */}
       {!loading && !error && (
         <FlatList
           data={album?.images ?? []}
@@ -1067,56 +945,19 @@ export default function AlbumDetailScreen() {
                     uppercase={false}
                     animationType='slide'
                   />
-                  {/* Location editable field */}
-                  <TouchableOpacity
-                    style={styles.expandedInputRow}
-                    onPress={() => setExpandedEditingLocation(v => !v)}
-                    accessibilityRole='button'
-                    accessibilityLabel='Edit location'
-                  >                    
-                    <MaterialIcons name='location-on' size={20} color='#111' style={{ marginRight:8 }} />
-                    {expandedEditingLocation ? (
-                      <TextInput
-                        style={styles.expandedInputText}
-                        placeholder='Enter location label'
-                        value={expandedLocationLabel}
-                        onChangeText={setExpandedLocationLabel}
-                        autoFocus
-                        placeholderTextColor='#777'
-                      />
-                    ) : (
-                      <ThemedText style={styles.expandedInputText}>{expandedLocationLabel || 'Add location'}</ThemedText>
-                    )}
-                  </TouchableOpacity>
-                  {expandedEditingLocation && (
-                    <TouchableOpacity onPress={() => {
-                      // Optionally exit edit mode
-                      setExpandedEditingLocation(false);
-                    }} style={[styles.expandedTagChip,{ alignSelf:'flex-start', marginBottom:12 }]} accessibilityRole='button'>
-                      <MaterialIcons name='check' size={16} color='#222' style={{ marginRight:6 }} />
-                      <ThemedText style={styles.expandedTagChipText}>Done</ThemedText>
-                    </TouchableOpacity>
-                  )}
-                  <TouchableOpacity onPress={async () => {
-                    try {
-                      const { status } = await Location.requestForegroundPermissionsAsync();
-                      if (status !== 'granted') return;
-                      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-                      setExpandedLat(pos.coords.latitude);
-                      setExpandedLon(pos.coords.longitude);
-                      let label = `${pos.coords.latitude.toFixed(3)}, ${pos.coords.longitude.toFixed(3)}`;
-                      try {
-                        const geo = await Location.reverseGeocodeAsync({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
-                        if (geo && geo[0]) label = formatPlace({ address: geo[0] });
-                      } catch {}
-                      setExpandedLocationLabel(label);
-                    } catch (e) {
-                      console.log('[Expanded Location] failed', e);
-                    }
-                  }} style={[styles.expandedTagChip, { alignSelf: 'flex-start', marginBottom: 12 }]} accessibilityRole='button' accessibilityLabel='Use current location'>
-                    <MaterialIcons name='my-location' size={16} color='#222' style={{ marginRight:6 }} />
-                    <ThemedText style={styles.expandedTagChipText}>Use current location</ThemedText>
-                  </TouchableOpacity>
+                  {/* Location editable field (shared picker) */}
+                  <View style={{ marginBottom: 12 }}>
+                    <LocationPicker
+                      value={expandedLocationLabel || null}
+                      onChange={(label, coords) => {
+                        setExpandedLocationLabel(label || '');
+                        if (coords) { setExpandedLat(coords.lat); setExpandedLon(coords.lon); }
+                      }}
+                      visible={expandedEditingLocation}
+                      onVisibleChange={setExpandedEditingLocation}
+                      triggerLabel='Add location'
+                    />
+                  </View>
                   {/* People selection */}
                   <ThemedText style={styles.expandedMetaHeading}>People</ThemedText>
                   <View style={styles.expandedChipRow}>
