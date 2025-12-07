@@ -11,7 +11,7 @@ import * as ImagePicker from 'expo-image-picker';
 import LocationPicker from '@/components/ui/location-picker';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, Image, PanResponder, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, Image, PanResponder, ScrollView, StyleSheet, Switch, TouchableOpacity, View } from 'react-native';
 import { DatePickerModal } from 'react-native-paper-dates';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // Animated Touchable for FAB (defined after all imports to satisfy lint rule)
@@ -417,6 +417,105 @@ export default function AlbumDetailScreen() {
   const startHeightRef = useRef(collapsedHeight);
   const [expanded, setExpanded] = useState(false); // react state to trigger UI changes
   const [activeTab, setActiveTab] = useState<'all'|'picture'|'video'>('all');
+  const [showMissingData, setShowMissingData] = useState(false);
+
+  // --- Matching & sorting helpers ---
+  /**
+   * Matching and sorting order notes:
+   * 1) Exact date inside selected range gets highest weight. Outside range decays over ~14 days.
+   * 2) Location label similarity: exact match (case-insensitive) scores 1. Substring/word overlap yields partial scores.
+   * 3) People/tags: +1 per matched item, −0.6 per missing selected item, −0.2 per extra item not in filters.
+   * 4) Combined score = date*2 + location*2 + people + tags. We sort descending by this score.
+   * 5) Media tab respected (videos currently excluded until supported).
+   * 6) Missing data switch optionally filters first (still sorted by match within that subset).
+   * 7) Display: show matched location label, matched people, matched tags, and matching date as an inline badge on the image.
+   */
+  function similarity(a: string, b: string): number {
+    if (!a || !b) return 0;
+    const A = a.toLowerCase();
+    const B = b.toLowerCase();
+    if (A === B) return 1;
+    if (A.includes(B) || B.includes(A)) return 0.7; // substring proximity
+    // token overlap
+    const ta = A.split(/[^a-z0-9]+/).filter(Boolean);
+    const tb = B.split(/[^a-z0-9]+/).filter(Boolean);
+    const setB = new Set(tb);
+    const overlap = ta.filter(t => setB.has(t)).length;
+    const denom = Math.max(ta.length, tb.length) || 1;
+    return Math.min(1, overlap / denom);
+  }
+
+  function dateProximityScore(targetStart: Date | null, targetEnd: Date | null, picked: any): number {
+    if (!targetStart && !targetEnd) return 0; // no date filter
+    if (!picked) return -0.5; // penalize missing date
+    let d: Date | null = null;
+    try { d = new Date(picked); } catch { d = null; }
+    if (!d || isNaN(d.getTime())) return -0.5;
+    const t = d.getTime();
+    const start = targetStart ? targetStart.getTime() : t;
+    const end = targetEnd ? targetEnd.getTime() : start;
+    // If single day selected, treat exact-day as perfect and non-match as stronger penalty
+    const isSingleDay = !!targetStart && !!targetEnd && targetStart.getTime() === targetEnd.getTime();
+    if (t >= start && t <= end) return 1; // inside range: perfect
+    // distance penalty: days away
+    const distMs = (t < start) ? (start - t) : (t - end);
+    const distDays = distMs / (24*60*60*1000);
+    // decay: closer gets higher score, far goes to 0
+    const score = Math.max(0, 1 - Math.min(1, distDays / 14)); // within 2 weeks yields >0
+    // When single day is selected, non-exact matches should rank noticeably lower
+    return isSingleDay ? Math.max(-0.3, score * 0.4) : (score * 0.7);
+  }
+
+  function peopleTagsScore(selected: string[], actual: any): { score: number; matched: string[]; missing: string[]; extras: string[] } {
+    const actualArr: string[] = Array.isArray(actual) ? actual : [];
+    const setActual = new Set(actualArr);
+    const matched = selected.filter(x => setActual.has(x));
+    const missing = selected.filter(x => !setActual.has(x));
+    const extras = actualArr.filter(x => !selected.includes(x));
+    let score = 0;
+    score += matched.length; // reward matches
+    score -= missing.length * 0.6; // penalize missing
+    score -= extras.length * 0.2; // small penalty for extras
+    return { score, matched, missing, extras };
+  }
+
+  function locationScore(filterLabel: string | null, imgLoc: any): { score: number; matchedLabel?: string } {
+    if (!filterLabel || !filterLabel.trim()) return { score: 0 };
+    const label = imgLoc?.placeLabel || '';
+    if (!label) return { score: -0.4 };
+    const sim = similarity(filterLabel, label);
+    return { score: (sim >= 0.99 ? 1 : sim), matchedLabel: sim > 0.3 ? label : undefined };
+  }
+
+  function computeImageMatch(img: any) {
+    // media type: currently images only
+    if (activeTab === 'video') return { score: -999, matched: { tags: [], people: [], label: undefined } };
+    const dateScore = dateProximityScore(startDate, endDate, img.picked_date);
+    const ppl = peopleTagsScore(selectedPeople, img.people);
+    const tg = peopleTagsScore(selectedTags, img.tags);
+    const loc = locationScore(location, img.location);
+    // Combine: weight date & location higher than extras/missing penalties
+  let score = (dateScore * 2) + (loc.score * 2) + ppl.score + tg.score;
+    // Determine matching date label (only when inside range or close)
+    let dateLabel: string | undefined = undefined;
+    let isExactDate = false;
+    if (img.picked_date) {
+      try {
+        const d = new Date(img.picked_date);
+        // Only show date tag for exact single-day match (user requested: don't highlight if only close-by)
+        if (startDate && endDate && startDate.getTime() === endDate.getTime()) {
+          const sameDay = d.toDateString() === startDate.toDateString();
+          if (sameDay) {
+            dateLabel = d.toLocaleDateString();
+            isExactDate = true;
+          }
+        }
+      } catch {}
+    }
+    // Strong bonus for exact-date to ensure it outranks near dates reliably
+    if (isExactDate) score += 1.5;
+    return { score, matched: { tags: tg.matched, people: ppl.matched, label: loc.matchedLabel, date: dateLabel }, isExactDate };
+  }
   // Date range selection state
   const [startDate, setStartDate] = useState<Date | null>(null);
   const [endDate, setEndDate] = useState<Date | null>(null);
@@ -627,6 +726,7 @@ export default function AlbumDetailScreen() {
                     if (location) arr.push({ key: 'loc', label: location, icon: 'location-on' });
                     selectedPeople.forEach((p, i) => arr.push({ key: `p-${i}`, label: p, icon: 'person' }));
                     selectedTags.forEach((t, i) => arr.push({ key: `t-${i}`, label: t, icon: 'sell' }));
+                    if (showMissingData) arr.push({ key: 'missing', label: 'Missing data: On', icon: 'warning' as any });
                     return arr;
                   })()}
                   keyExtractor={(item) => item.key}
@@ -666,6 +766,15 @@ export default function AlbumDetailScreen() {
             </View>
             {expanded && (
               <>
+                {/* Missing data toggle (clear on/off switch) */}
+                <View style={[styles.sectionRow, { justifyContent: 'space-between', alignItems: 'center' }]}>                  
+                  <ThemedText style={styles.sectionLabel}>Show photos with missing data</ThemedText>
+                  <Switch
+                    value={showMissingData}
+                    onValueChange={setShowMissingData}
+                    accessibilityLabel="Show photos with missing data"
+                  />
+                </View>
                 {/* Date range selector modal trigger (single or multi-day) */}
                 <TouchableOpacity
                   onPress={() => setDateRangeOpen(true)}
@@ -774,20 +883,57 @@ export default function AlbumDetailScreen() {
         {/* Shared modal handled by LocationPicker; inline legacy modal removed */}
       {!loading && !error && (
         <FlatList
-          data={album?.images ?? []}
+          data={(album?.images ?? [])
+            .map((im:any, idx:number) => ({ im, match: computeImageMatch(im), __idx: idx }))
+            .filter(({ im }) => {
+              if (!im) return false;
+              if (showMissingData) {
+                const missingTags = !Array.isArray(im.tags) || !im.tags.length;
+                const missingPeople = !Array.isArray(im.people) || !im.people.length;
+                const missingDate = typeof im.picked_date === 'undefined' || im.picked_date === null;
+                const missingLoc = typeof im.location === 'undefined' || !im.location || im.location.lat == null || im.location.lon == null;
+                return missingTags || missingPeople || missingDate || missingLoc;
+              }
+              return true;
+            })
+            .sort((a,b) => {
+              // Primary: score desc
+              const byScore = (b.match.score - a.match.score);
+              if (byScore !== 0) return byScore;
+              // Secondary: prefer exact date matches
+              const aExact = !!a.match.isExactDate;
+              const bExact = !!b.match.isExactDate;
+              if (aExact !== bExact) return bExact ? 1 : -1;
+              // Tertiary: stable by original index to avoid shuffle
+              return a.__idx - b.__idx;
+            })
+          }
+          extraData={{
+            startDate: startDate?.getTime?.() ?? null,
+            endDate: endDate?.getTime?.() ?? null,
+            location,
+            selectedPeople: selectedPeople.join('|'),
+            selectedTags: selectedTags.join('|'),
+            showMissingData,
+            activeTab,
+            albumImagesVersion: (album?.images || []).map((im:any) => `${im?._id||im?.id||''}:${(im?.picked_date||'')}:${(Array.isArray(im?.tags)?im.tags.join(','):'')}:${(Array.isArray(im?.people)?im.people.join(','):'')}`).join(';')
+          }}
           keyExtractor={(item, idx) => (item && typeof item === 'object' && (item as any)._id) ? String((item as any)._id) : String(idx)}
           contentContainerStyle={styles.galleryContent}
           renderItem={({ item }) => {
-            if (item?.imagecode) {
+            const isMapped = (item as any)?.im !== undefined && (item as any)?.match !== undefined;
+            const entry:any = isMapped ? (item as any).im : item;
+            const matchInfo = isMapped ? (item as any).match : null;
+            if (entry?.imagecode) {
               let ref: View | null = null;
               const handlePress = () => {
                 const finalize = (layout: { x:number;y:number;width:number;height:number }) => {
-                  setExpandedImage({ image: item, layout });
-                  setExpandedTags(Array.isArray((item as any).tags) ? (item as any).tags : []);
-                  setExpandedPeople(Array.isArray((item as any).people) ? (item as any).people : []);
-                  const pickedRaw = (item as any).picked_date;
+                  setExpandedImage({ image: entry, layout });
+                  setExpandedTags(Array.isArray((entry as any).tags) ? (entry as any).tags : []);
+                  setExpandedPeople(Array.isArray((entry as any).people) ? (entry as any).people : []);
+                  const pickedRaw = (entry as any).picked_date;
                   setExpandedPickedDate(pickedRaw ? new Date(pickedRaw) : null);
-                  const loc = (item as any).location;
+                  const loc = (entry as any).location;
                   if (loc && (loc.lat != null) && (loc.lon != null)) {
                     setExpandedLat(Number(loc.lat));
                     setExpandedLon(Number(loc.lon));
@@ -823,8 +969,41 @@ export default function AlbumDetailScreen() {
                     accessibilityRole='button'
                     accessibilityLabel='Expand image'
                   >
-                    <Image source={{ uri: `data:image/jpeg;base64,${item.imagecode}` }} style={styles.imageThumb} resizeMode='cover' />
+                    <Image source={{ uri: `data:image/jpeg;base64,${entry.imagecode}` }} style={styles.imageThumb} resizeMode='cover' />
                   </TouchableOpacity>
+                  {/* Matching badges overlay inside image frame */}
+                  {matchInfo && (
+                    <View style={{ position: 'absolute', left: 10, right: 10, bottom: 20, flexDirection: 'row', flexWrap: 'wrap' }}>
+                      {/* Date: only shown on exact match; smaller compact pill */}
+                      {matchInfo.matched.date && (
+                        <View style={{ flexDirection:'row', alignItems:'center', paddingHorizontal:10, paddingVertical:6, borderRadius:14, backgroundColor:'rgba(255,255,255,0.92)', marginRight:6, marginBottom:6, borderWidth:1, borderColor:'#d9d9d9' }}>
+                          <MaterialIcons name='calendar-today' size={13} color='#7033ff' style={{ marginRight:6 }} />
+                          <ThemedText style={{ fontSize:12, fontWeight:'600', color:'#222' }}>{matchInfo.matched.date}</ThemedText>
+                        </View>
+                      )}
+                      {/* Location label */}
+                      {matchInfo.matched.label && (
+                        <View style={{ flexDirection:'row', alignItems:'center', paddingHorizontal:10, paddingVertical:6, borderRadius:14, backgroundColor:'rgba(255,255,255,0.92)', marginRight:6, marginBottom:6, borderWidth:1, borderColor:'#d9d9d9' }}>
+                          <MaterialIcons name='location-on' size={13} color='#7033ff' style={{ marginRight:6 }} />
+                          <ThemedText style={{ fontSize:12, fontWeight:'600', color:'#222' }}>{matchInfo.matched.label}</ThemedText>
+                        </View>
+                      )}
+                      {/* People */}
+                      {matchInfo.matched.people.map((p:string, i:number) => (
+                        <View key={`mp-${i}`} style={{ flexDirection:'row', alignItems:'center', paddingHorizontal:10, paddingVertical:6, borderRadius:14, backgroundColor:'rgba(255,255,255,0.92)', marginRight:6, marginBottom:6, borderWidth:1, borderColor:'#d9d9d9' }}>
+                          <MaterialIcons name='person' size={13} color='#7033ff' style={{ marginRight:6 }} />
+                          <ThemedText style={{ fontSize:12, fontWeight:'600', color:'#222' }}>{p}</ThemedText>
+                        </View>
+                      ))}
+                      {/* Tags */}
+                      {matchInfo.matched.tags.map((t:string, i:number) => (
+                        <View key={`mt-${i}`} style={{ flexDirection:'row', alignItems:'center', paddingHorizontal:10, paddingVertical:6, borderRadius:14, backgroundColor:'rgba(255,255,255,0.92)', marginRight:6, marginBottom:6, borderWidth:1, borderColor:'#d9d9d9' }}>
+                          <MaterialIcons name='sell' size={13} color='#7033ff' style={{ marginRight:6 }} />
+                          <ThemedText style={{ fontSize:12, fontWeight:'600', color:'#222' }}>{t}</ThemedText>
+                        </View>
+                      ))}
+                    </View>
+                  )}
                 </View>
               );
             }

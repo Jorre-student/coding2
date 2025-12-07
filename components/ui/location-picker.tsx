@@ -104,17 +104,28 @@ export default function LocationPicker({ value, onChange, visible, onVisibleChan
 
   return (
     <>
-      <TouchableOpacity
-        onPress={() => onVisibleChange(true)}
-        style={styles.inputField}
-        accessibilityRole="button"
-        accessibilityLabel={value ? 'Location selected' : 'Open location picker'}
-      >
-        <MaterialIcons name="location-on" size={20} color="#444" style={styles.inputIcon} />
-        <ThemedText style={styles.inputPlaceholder}>
-          {value ? value : (locationLoading ? 'Fetching...' : (triggerLabel || 'Add a location'))}
-        </ThemedText>
-      </TouchableOpacity>
+      <View style={[styles.inputField, { justifyContent: 'space-between' }]}>        
+        <TouchableOpacity
+          onPress={() => onVisibleChange(true)}
+          accessibilityRole="button"
+          accessibilityLabel={value ? 'Location selected' : 'Open location picker'}
+          style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}
+        >
+          <MaterialIcons name="location-on" size={20} color="#444" style={styles.inputIcon} />
+          <ThemedText style={styles.inputPlaceholder}>
+            {value ? value : (locationLoading ? 'Fetching...' : (triggerLabel || 'Add a location'))}
+          </ThemedText>
+        </TouchableOpacity>
+        {!!value && (
+          <TouchableOpacity
+            onPress={() => onChange(null)}
+            accessibilityLabel="Clear location"
+            style={styles.clearIconButton}
+          >
+            <MaterialIcons name="close" size={18} color="#666" />
+          </TouchableOpacity>
+        )}
+      </View>
       {visible && (
         <Modal visible animationType="slide" transparent onRequestClose={() => onVisibleChange(false)}>
           <View style={styles.locationModalBackdrop}>
@@ -187,6 +198,7 @@ const styles = StyleSheet.create({
   inputField: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12, borderWidth: 1, borderColor: '#e2e2e2' },
   inputIcon: { marginRight: 10 },
   inputPlaceholder: { fontSize: 14, color: '#444', fontWeight: '500' },
+  clearIconButton: { marginLeft: 8, paddingHorizontal: 8, paddingVertical: 4 },
   locationModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.25)', justifyContent: 'flex-end' },
   locationModal: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingTop: 12, maxHeight: '80%', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 10, shadowOffset: { width: 0, height: -4 } },
   locationModalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginBottom: 8 },
