@@ -9,9 +9,9 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 // expo-location used inside LocationPicker component
 import LocationPicker from '@/components/ui/location-picker';
-import { Stack, useLocalSearchParams } from 'expo-router';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, Image, PanResponder, ScrollView, StyleSheet, Switch, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, Image, Modal, PanResponder, ScrollView, StyleSheet, Switch, TextInput, TouchableOpacity, View } from 'react-native';
 import { DatePickerModal } from 'react-native-paper-dates';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // Animated Touchable for FAB (defined after all imports to satisfy lint rule)
@@ -21,16 +21,25 @@ interface Album {
   _id: string;
   name: string;
   images?: { _id?: string; imagecode?: string }[]; // adapt when API defined
+  participants?: { _id?: string; id?: string; email?: string; username?: string }[];
+  users?: (string | { _id?: string; id?: string; email?: string; username?: string })[];
 }
 
 export default function AlbumDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  const router = useRouter();
   // router removed; inline overlay replaces navigation
   const [album, setAlbum] = useState<Album | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Invite modal state
+  const [inviteVisible, setInviteVisible] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviting, setInviting] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteSuccessUsername, setInviteSuccessUsername] = useState<string | null>(null);
   // Inline expand overlay state
   const [expandedImage, setExpandedImage] = useState<{ image: any; layout: { x: number; y: number; width: number; height: number } } | null>(null);
   // Per-expanded-image metadata selections
@@ -523,7 +532,23 @@ export default function AlbumDetailScreen() {
   const [location, setLocation] = useState<string | null>(null);
   const [locationModalVisible, setLocationModalVisible] = useState(false);
   // Location picker state now handled by shared component; keep only selected label and visibility
-  const peoplePool = ['You', 'Alice', 'Bob', 'Charlie'];
+  const peoplePool = React.useMemo(() => {
+    const names: string[] = [];
+    const add = (v?: string | null) => { if (v && !names.includes(v)) names.push(v); };
+    const fromUser = (u: any) => u?.username || null;
+    if (Array.isArray(album?.users)) {
+      for (const u of album!.users!) {
+        if (typeof u === 'string') continue; // no way to resolve username without lookup
+        add(fromUser(u));
+      }
+    }
+    if (Array.isArray(album?.participants)) {
+      for (const u of album!.participants!) add(fromUser(u));
+    }
+    // Fallbacks to keep UI useful if empty
+    if (names.length === 0) ['You','Alice','Bob','Charlie'].forEach(add);
+    return names;
+  }, [album]);
   const tagPool = ['Vacation', 'Family', 'Work', 'Favorites'];
   const [selectedPeople, setSelectedPeople] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
@@ -685,7 +710,32 @@ export default function AlbumDetailScreen() {
 
   return (
     <ThemedView style={[styles.container, { backgroundColor: t.background }]}>      
-  <Stack.Screen options={{ title: album?.name || 'Album', headerShown: !expandedImage }} />
+  <Stack.Screen 
+    options={{ 
+      title: album?.name || 'Album', 
+      headerShown: !expandedImage,
+      headerRight: () => (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 18, paddingRight: 10 }}>
+          <TouchableOpacity
+            onPress={() => setInviteVisible(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Invite people"
+            hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+          >
+            <MaterialIcons name="person-add" size={22} color={t.foreground} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => router.push(`/album/${id}/settings`)}
+            accessibilityRole="button"
+            accessibilityLabel="Settings"
+            hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+          >
+            <MaterialIcons name="settings" size={22} color={t.foreground} />
+          </TouchableOpacity>
+        </View>
+      )
+    }} 
+  />
       {/* Attach feature removed */}
       {loading && (
         <View style={styles.centerWrap}><ActivityIndicator color={t.primary} /></View>
@@ -1198,6 +1248,112 @@ export default function AlbumDetailScreen() {
       >
         <MaterialIcons name="add" size={34} color="#fff" />
       </AnimatedFab>
+      {/* Invite people modal */}
+      <Modal visible={inviteVisible} transparent animationType="fade" onRequestClose={() => setInviteVisible(false)}>
+        <View style={styles.inviteBackdrop}>
+          <View style={[styles.inviteCard, shadows.sm]}>            
+            <View style={styles.inviteHeaderRow}>
+              <ThemedText style={styles.inviteTitle}>Invite friends</ThemedText>
+              <TouchableOpacity onPress={() => setInviteVisible(false)} accessibilityLabel="Close invite">
+                <MaterialIcons name="close" size={22} color="#111" />
+              </TouchableOpacity>
+            </View>
+            <ThemedText style={styles.inviteSubtitle}>Add people to your album so they can upload photos too!</ThemedText>
+            <ThemedText style={styles.inviteLabel}>Email</ThemedText>
+            <TextInput
+              value={inviteEmail}
+              onChangeText={setInviteEmail}
+              placeholder="name@example.com"
+              placeholderTextColor="#9a9a9a"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={styles.inviteInput}
+            />
+            {!!inviteError && <ThemedText style={styles.inviteError}>{inviteError}</ThemedText>}
+            {!!inviteSuccessUsername && <ThemedText style={styles.inviteSuccess}>Invited {inviteSuccessUsername}</ThemedText>}
+            <TouchableOpacity
+              onPress={async () => {
+                // basic email validation
+                const email = (inviteEmail || '').trim();
+                setInviteError(null);
+                setInviteSuccessUsername(null);
+                if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+                  setInviteError('Please enter a valid email');
+                  return;
+                }
+                try {
+                  setInviting(true);
+                  // extract token
+                  let token: string | null = null;
+                  try {
+                    const raw = await AsyncStorage.getItem('session');
+                    if (raw) { const s = JSON.parse(raw); token = s?.token || s?.accessToken || s?.jwt || s?.authorization || s?.user?.token || null; }
+                  } catch {}
+                  const headers: Record<string,string> = { 'Content-Type': 'application/json' };
+                  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+                  // 1) Resolve email -> user id via GET /api/users (same as create-album flow)
+                  const resUsers = await fetch('https://coding-bh7d.onrender.com/api/users', { headers });
+                  let usersJson: any = null; try { usersJson = await resUsers.json(); } catch {}
+                  if (!resUsers.ok || !Array.isArray(usersJson)) {
+                    throw new Error('Unable to fetch users to resolve email');
+                  }
+                  const lower = email.toLowerCase();
+                  const matched = usersJson.find((u: any) => String(u?.email || '').toLowerCase() === lower);
+                  if (!matched || !(matched._id || matched.id)) {
+                    throw new Error('Unknown user email');
+                  }
+                  const userId: string = String(matched._id || matched.id);
+                  const username: string = matched.username || email.split('@')[0];
+
+                  // 2) Attach user via POST /api/albums/:id/users/attach
+                  const resAttach = await fetch(`https://coding-bh7d.onrender.com/api/albums/${id}/users/attach`, {
+                    method: 'POST', headers, body: JSON.stringify({ userId })
+                  });
+                  let attachJson: any = null; try { attachJson = await resAttach.json(); } catch {}
+                  if (!resAttach.ok) {
+                    const msg = (attachJson && (attachJson.error || attachJson.message)) || `Attach failed (${resAttach.status})`;
+                    throw new Error(msg);
+                  }
+
+                  setInviteSuccessUsername(username);
+                  setInviteEmail('');
+                  // Update album from server if provided, else patch locally for immediate feedback
+                  if (attachJson?.album) {
+                    setAlbum((prev) => ({ ...(prev || {} as any), ...(attachJson.album || {}) } as any));
+                  } else {
+                    setAlbum(prev => prev ? {
+                      ...prev,
+                      users: (() => {
+                        const list = Array.isArray(prev.users) ? [...prev.users] : [];
+                        const exists = list.some((u:any) => (typeof u === 'string' ? u === userId : ((u._id||u.id) === userId)));
+                        if (!exists) list.push({ _id: userId, email, username });
+                        return list;
+                      })(),
+                      participants: (() => {
+                        const list = Array.isArray(prev.participants) ? [...prev.participants] : [];
+                        const exists = list.some((p:any) => ((p._id||p.id) === userId));
+                        if (!exists) list.push({ _id: userId, email, username });
+                        return list;
+                      })(),
+                    } : prev);
+                  }
+                } catch (e: any) {
+                  setInviteError(e?.message || 'Failed to invite');
+                } finally {
+                  setInviting(false);
+                }
+              }}
+              disabled={inviting}
+              accessibilityLabel="Invite user by email"
+              style={[styles.inviteButton, inviting && { opacity: 0.7 }]}
+            >
+              {inviting ? <ActivityIndicator color="#fff" /> : <ThemedText style={styles.inviteButtonText}>Invite</ThemedText>}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </ThemedView>
   );
 }
@@ -1449,6 +1605,18 @@ const styles = StyleSheet.create({
   expandedSaveMetaButton: { marginTop:4, backgroundColor:'#111', paddingVertical:12, borderRadius:10, alignItems:'center' },
   expandedSaveMetaText: { color:'#fff', fontSize:14, fontWeight:'600' },
   expandedSavingIndicator: { fontSize:12, fontWeight:'500', color:'#555', marginTop:4 },
+  // Invite modal styles
+  inviteBackdrop: { flex:1, backgroundColor:'rgba(0,0,0,0.25)', alignItems:'center', justifyContent:'center', padding:20 },
+  inviteCard: { width:'100%', maxWidth: 520, backgroundColor:'#fff', borderRadius:18, padding:20, shadowColor:'#000', shadowOpacity:0.15, shadowRadius:12, shadowOffset:{ width:0, height:6 } },
+  inviteHeaderRow: { flexDirection:'row', alignItems:'center', justifyContent:'space-between', marginBottom:8 },
+  inviteTitle: { fontSize:22, fontWeight:'700', color:'#111' },
+  inviteSubtitle: { fontSize:16, color:'#666', marginBottom:16 },
+  inviteLabel: { fontSize:16, fontWeight:'700', color:'#111', marginBottom:8 },
+  inviteInput: { backgroundColor:'#fff', borderRadius:12, borderWidth:1, borderColor:'#e0e0e0', paddingHorizontal:14, paddingVertical:12, fontSize:15, color:'#111', marginBottom:16 },
+  inviteButton: { backgroundColor:'#111', borderRadius:14, alignItems:'center', justifyContent:'center', paddingVertical:14 },
+  inviteButtonText: { color:'#fff', fontSize:16, fontWeight:'700' },
+  inviteError: { color:'#c00', marginBottom:8, fontWeight:'600' },
+  inviteSuccess: { color:'#0a7', marginBottom:8, fontWeight:'600' },
 });
 
 async function requestLibraryPermission() {

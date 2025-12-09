@@ -128,7 +128,7 @@ export default function CreateAlbumScreen() {
         <TextInput
           style={styles.input}
           placeholder="Album name"
-          placeholderTextColor="#888"
+          placeholderTextColor="#9a9a9a"
           value={name}
           onChangeText={setName}
         />
@@ -136,7 +136,7 @@ export default function CreateAlbumScreen() {
           <TextInput
             style={[styles.input, styles.emailInput]}
             placeholder="Add user by email"
-            placeholderTextColor="#888"
+            placeholderTextColor="#9a9a9a"
             autoCapitalize="none"
             keyboardType="email-address"
             value={emailInput}
