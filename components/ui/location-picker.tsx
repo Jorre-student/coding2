@@ -2,7 +2,7 @@ import { ThemedText } from '@/components/themed-text';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import * as Location from 'expo-location';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Modal, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 
 type Props = {
   value: string | null;
@@ -128,7 +128,7 @@ export default function LocationPicker({ value, onChange, visible, onVisibleChan
       </View>
       {visible && (
         <Modal visible animationType="slide" transparent onRequestClose={() => onVisibleChange(false)}>
-          <View style={styles.locationModalBackdrop}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.locationModalBackdrop}>
             <View style={styles.locationModal}>
               <View style={styles.locationModalHeader}>
                 <ThemedText style={styles.locationModalTitle}>Add Location</ThemedText>
@@ -187,7 +187,7 @@ export default function LocationPicker({ value, onChange, visible, onVisibleChan
                 </View>
               </ScrollView>
             </View>
-          </View>
+          </KeyboardAvoidingView>
         </Modal>
       )}
     </>

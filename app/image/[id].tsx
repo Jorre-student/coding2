@@ -4,7 +4,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Easing, Image, PanResponder, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Animated, Easing, Image, KeyboardAvoidingView, PanResponder, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 import { DatePickerModal } from 'react-native-paper-dates';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -111,7 +111,8 @@ export default function ImageFullscreenScreen() {
   const composedURI = bigImageURI ? `data:image/jpeg;base64,${bigImageURI}` : undefined;
 
   return (
-    <ThemedView style={styles.screenRoot}>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <ThemedView style={styles.screenRoot}>
       <Stack.Screen options={{ headerShown: false }} />
       <Animated.View style={[styles.dragContainer, { transform: [{ translateY }], opacity }]} {...panResponder.panHandlers}>
         <ScrollView contentContainerStyle={{ paddingBottom: 60 }} showsVerticalScrollIndicator={false}>
@@ -236,7 +237,8 @@ export default function ImageFullscreenScreen() {
         {/* Close affordance (invisible area) */}
         <TouchableOpacity style={styles.closeDragZone} activeOpacity={1} onPress={() => router.back()} />
       </Animated.View>
-    </ThemedView>
+      </ThemedView>
+    </KeyboardAvoidingView>
   );
 }
 

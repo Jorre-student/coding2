@@ -11,7 +11,7 @@ import * as ImagePicker from 'expo-image-picker';
 import LocationPicker from '@/components/ui/location-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, Image, Modal, PanResponder, ScrollView, StyleSheet, Switch, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, Image, KeyboardAvoidingView, Modal, PanResponder, Platform, ScrollView, StyleSheet, Switch, TextInput, TouchableOpacity, View } from 'react-native';
 import { DatePickerModal } from 'react-native-paper-dates';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // Animated Touchable for FAB (defined after all imports to satisfy lint rule)
@@ -532,24 +532,192 @@ export default function AlbumDetailScreen() {
   const [location, setLocation] = useState<string | null>(null);
   const [locationModalVisible, setLocationModalVisible] = useState(false);
   // Location picker state now handled by shared component; keep only selected label and visibility
-  const peoplePool = React.useMemo(() => {
-    const names: string[] = [];
-    const add = (v?: string | null) => { if (v && !names.includes(v)) names.push(v); };
+  // Extra people persisted per-album (people are taggable names, not necessarily users)
+  const [extraPeople, setExtraPeople] = useState<{ name: string; avatarUri?: string }[]>([]);
+  const [addPersonVisible, setAddPersonVisible] = useState(false);
+  const [newPersonName, setNewPersonName] = useState('');
+  const [newPersonAvatarUri, setNewPersonAvatarUri] = useState<string | undefined>(undefined);
+  const [newPersonError, setNewPersonError] = useState<string | null>(null);
+  const [savingNewPerson, setSavingNewPerson] = useState(false);
+  // Tag add modal state
+  const [addTagVisible, setAddTagVisible] = useState(false);
+  const [newTagText, setNewTagText] = useState('');
+  const [newTagError, setNewTagError] = useState<string | null>(null);
+
+  // User directory cache to resolve user IDs -> usernames when album users aren't populated
+  const [userDirectory, setUserDirectory] = useState<Record<string, { username?: string; email?: string }>>({});
+  useEffect(() => {
+    (async () => {
+      try {
+        // Only fetch once if empty
+        if (Object.keys(userDirectory).length) return;
+        let token: string | null = null;
+        try {
+          const raw = await AsyncStorage.getItem('session');
+          if (raw) { const s = JSON.parse(raw); token = s?.token || s?.accessToken || s?.jwt || s?.authorization || s?.user?.token || null; }
+        } catch {}
+        const headers: Record<string,string> = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const res = await fetch('https://coding-bh7d.onrender.com/api/users', { headers });
+        let json: any = null; try { json = await res.json(); } catch {}
+        if (res.ok && Array.isArray(json)) {
+          const map: Record<string, { username?: string; email?: string }> = {};
+          for (const u of json) {
+            const id = String(u?._id || u?.id || '');
+            if (!id) continue;
+            map[id] = { username: u?.username, email: u?.email };
+          }
+          setUserDirectory(map);
+        }
+      } catch {}
+    })();
+  }, [userDirectory]);
+
+  useEffect(() => {
+    // Load saved people for this album from AsyncStorage
+    (async () => {
+      try {
+        const key = `album:${id}:people`;
+        const raw = await AsyncStorage.getItem(key);
+        if (raw) {
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr)) setExtraPeople(arr.filter(x => x && x.name));
+        }
+      } catch {}
+    })();
+  }, [id]);
+
+  const saveExtraPeople = React.useCallback(async (list: { name: string; avatarUri?: string }[]) => {
+    setExtraPeople(list);
+    try { await AsyncStorage.setItem(`album:${id}:people`, JSON.stringify(list)); } catch {}
+  }, [id]);
+
+  // Helper: usernames from album users/participants
+  const albumUsernames = React.useMemo(() => {
+    const out: string[] = [];
+    const add = (v?: string | null) => { if (v && !out.includes(v)) out.push(v); };
     const fromUser = (u: any) => u?.username || null;
     if (Array.isArray(album?.users)) {
       for (const u of album!.users!) {
-        if (typeof u === 'string') continue; // no way to resolve username without lookup
+        if (typeof u === 'string') { const m = userDirectory[u]; add(m?.username || null); continue; }
         add(fromUser(u));
       }
     }
     if (Array.isArray(album?.participants)) {
       for (const u of album!.participants!) add(fromUser(u));
     }
-    // Fallbacks to keep UI useful if empty
-    if (names.length === 0) ['You','Alice','Bob','Charlie'].forEach(add);
-    return names;
+    return out;
+  }, [album, userDirectory]);
+
+  // Merge any API-provided album.people into local extras (avoid duplicating usernames)
+  const albumUsernamesKey = React.useMemo(() => albumUsernames.join('|'), [albumUsernames]);
+  useEffect(() => {
+    const apiPeople: any = (album as any)?.people;
+    if (!Array.isArray(apiPeople) || !apiPeople.length) return;
+    const usernameSet = new Set(albumUsernames.map(x => x.toLowerCase()));
+    const currentSet = new Set(extraPeople.map(p => p.name.toLowerCase()));
+    const additions: { name: string }[] = [];
+    for (const name of apiPeople) {
+      const n = String(name || '').trim(); if (!n) continue;
+      const low = n.toLowerCase();
+      if (!usernameSet.has(low) && !currentSet.has(low)) additions.push({ name: n });
+    }
+    if (additions.length) saveExtraPeople([...extraPeople, ...additions]);
+  }, [album, albumUsernamesKey, albumUsernames, extraPeople, saveExtraPeople]);
+
+  // Track people known by server to compute add/remove deltas
+  const serverPeopleRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const apiPeople: string[] = Array.isArray((album as any)?.people) ? (album as any).people : [];
+    serverPeopleRef.current = new Set((apiPeople || []).map(p => String(p).trim()).filter(Boolean));
   }, [album]);
-  const tagPool = ['Vacation', 'Family', 'Work', 'Favorites'];
+
+  // Sync directory of people to API using dedicated endpoints
+  const syncPeopleDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (syncPeopleDebounceRef.current) clearTimeout(syncPeopleDebounceRef.current as any);
+    syncPeopleDebounceRef.current = setTimeout(async () => {
+      try {
+        // Compute desired set from usernames + custom extras
+        const namesSet = new Set<string>();
+        albumUsernames.forEach(n => { if (n) namesSet.add(String(n)); });
+        extraPeople.forEach(p => { const n = (p?.name || '').trim(); if (n) namesSet.add(n); });
+        const desired = Array.from(namesSet);
+        // Read token
+        let token: string | null = null;
+        try {
+          const raw = await AsyncStorage.getItem('session');
+          if (raw) { const s = JSON.parse(raw); token = s?.token || s?.accessToken || s?.jwt || s?.authorization || s?.user?.token || null; }
+        } catch {}
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        // Compute delta vs. last known server set
+        const serverSet = serverPeopleRef.current;
+        const toAdd = desired.filter(n => !serverSet.has(n));
+        const toRemove = Array.from(serverSet).filter(n => !namesSet.has(n));
+        // Call backend endpoints
+        if (toAdd.length) {
+          const res = await fetch(`https://coding-bh7d.onrender.com/api/albums/${id}/people/add`, {
+            method: 'POST', headers, body: JSON.stringify({ people: toAdd })
+          });
+          // Best-effort; ignore errors to avoid loops
+          try { await res.json(); } catch {}
+        }
+        if (toRemove.length) {
+          const res = await fetch(`https://coding-bh7d.onrender.com/api/albums/${id}/people/remove`, {
+            method: 'POST', headers, body: JSON.stringify({ people: toRemove })
+          });
+          try { await res.json(); } catch {}
+        }
+        // Update local server ref and album.people for immediate UI consistency
+        const nextServer = new Set(desired);
+        serverPeopleRef.current = nextServer;
+        setAlbum(prev => prev ? { ...prev, people: Array.from(nextServer) } : prev);
+      } catch {}
+    }, 500);
+    return () => { if (syncPeopleDebounceRef.current) clearTimeout(syncPeopleDebounceRef.current as any); };
+  }, [extraPeople, albumUsernamesKey, id, albumUsernames]);
+
+  const peoplePool = React.useMemo(() => {
+    // Aggregate: album users (usernames) + image metadata people + extra saved people
+    const lowerToName = new Map<string, string>();
+    const add = (v?: string | null) => {
+      if (!v) return;
+      const key = String(v).trim();
+      if (!key) return;
+      const low = key.toLowerCase();
+      if (!lowerToName.has(low)) lowerToName.set(low, key);
+    };
+    // Add usernames from memoized list
+    albumUsernames.forEach(add);
+    if (Array.isArray(album?.images)) {
+      for (const im of album!.images!) {
+        const ppl = Array.isArray((im as any)?.people) ? (im as any).people : [];
+        for (const p of ppl) add(p);
+      }
+    }
+    for (const ep of extraPeople) add(ep?.name);
+    const names = Array.from(lowerToName.values());
+    names.sort((a,b) => a.localeCompare(b));
+    return names;
+  }, [album, extraPeople, albumUsernames]);
+  const tagPool = React.useMemo(() => {
+    const set = new Set<string>();
+    // Include album-level tags from server
+    if (Array.isArray((album as any)?.tags)) {
+      ((album as any).tags as any[]).forEach((t: any) => { const s = String(t || '').trim(); if (s) set.add(s); });
+    }
+    // Include tags found on images for discoverability
+    if (Array.isArray(album?.images)) {
+      for (const im of album!.images!) {
+        const tags = Array.isArray((im as any)?.tags) ? (im as any).tags : [];
+        for (const t of tags) { const s = String(t || '').trim(); if (s) set.add(s); }
+      }
+    }
+    // Add a few defaults
+    ['Vacation', 'Family', 'Work', 'Favorites'].forEach(s => set.add(s));
+    return Array.from(set).sort((a,b)=>a.localeCompare(b));
+  }, [album]);
   const [selectedPeople, setSelectedPeople] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   // Location & search helper functions
@@ -888,7 +1056,7 @@ export default function AlbumDetailScreen() {
                 {/* People */}
                 <ThemedText style={styles.sectionHeading}>People</ThemedText>
                 <View style={styles.chipRow}>
-                  <TouchableOpacity style={styles.addChip} accessibilityRole="button" accessibilityLabel="Add person">
+                  <TouchableOpacity style={styles.addChip} accessibilityRole="button" accessibilityLabel="Add person" onPress={() => { setNewPersonName(''); setNewPersonAvatarUri(undefined); setNewPersonError(null); setAddPersonVisible(true); }}>
                     <MaterialIcons name="add" size={20} color="#444" />
                   </TouchableOpacity>
                   {peoplePool.map((p, idx) => {
@@ -908,7 +1076,7 @@ export default function AlbumDetailScreen() {
                 {/* Tags */}
                 <ThemedText style={styles.sectionHeading}>Tags</ThemedText>
                 <View style={styles.chipRow}>
-                  <TouchableOpacity style={styles.addChip} accessibilityRole="button" accessibilityLabel="Add tag">
+                  <TouchableOpacity style={styles.addChip} accessibilityRole="button" accessibilityLabel="Add tag" onPress={() => { setNewTagText(''); setAddTagVisible(true); }}>
                     <MaterialIcons name="add" size={20} color="#444" />
                   </TouchableOpacity>
                   {tagPool.map((tag, idx) => {
@@ -1250,7 +1418,7 @@ export default function AlbumDetailScreen() {
       </AnimatedFab>
       {/* Invite people modal */}
       <Modal visible={inviteVisible} transparent animationType="fade" onRequestClose={() => setInviteVisible(false)}>
-        <View style={styles.inviteBackdrop}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.inviteBackdrop}>
           <View style={[styles.inviteCard, shadows.sm]}>            
             <View style={styles.inviteHeaderRow}>
               <ThemedText style={styles.inviteTitle}>Invite friends</ThemedText>
@@ -1352,7 +1520,137 @@ export default function AlbumDetailScreen() {
               {inviting ? <ActivityIndicator color="#fff" /> : <ThemedText style={styles.inviteButtonText}>Invite</ThemedText>}
             </TouchableOpacity>
           </View>
-        </View>
+        </KeyboardAvoidingView>
+      </Modal>
+      {/* Add tag modal (album tags) */}
+      <Modal visible={addTagVisible} transparent animationType="fade" onRequestClose={() => setAddTagVisible(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.inviteBackdrop}>
+          <View style={[styles.inviteCard, shadows.sm]}>            
+            <View style={styles.inviteHeaderRow}>
+              <ThemedText style={styles.inviteTitle}>Add a tag</ThemedText>
+              <TouchableOpacity onPress={() => setAddTagVisible(false)} accessibilityLabel="Close add tag">
+                <MaterialIcons name="close" size={22} color="#111" />
+              </TouchableOpacity>
+            </View>
+            <ThemedText style={styles.inviteLabel}>Tag</ThemedText>
+            <TextInput
+              value={newTagText}
+              onChangeText={setNewTagText}
+              placeholder="e.g. Friends"
+              placeholderTextColor="#9a9a9a"
+              autoCapitalize="words"
+              autoCorrect={false}
+              style={styles.inviteInput}
+            />
+            {!!newTagError && <ThemedText style={styles.inviteError}>{newTagError}</ThemedText>}
+            <TouchableOpacity
+              onPress={async () => {
+                const tag = (newTagText || '').trim();
+                setNewTagError(null);
+                if (!tag) { setNewTagError('Please enter a tag'); return; }
+                // Call API to add tag
+                try {
+                  let token: string | null = null;
+                  try {
+                    const raw = await AsyncStorage.getItem('session');
+                    if (raw) { const s = JSON.parse(raw); token = s?.token || s?.accessToken || s?.jwt || s?.authorization || s?.user?.token || null; }
+                  } catch {}
+                  const headers: Record<string,string> = { 'Content-Type': 'application/json' };
+                  if (token) headers['Authorization'] = `Bearer ${token}`;
+                  const res = await fetch(`https://coding-bh7d.onrender.com/api/albums/${id}/tags/add`, {
+                    method: 'POST', headers, body: JSON.stringify({ tags: [tag] })
+                  });
+                  let json: any = null; try { json = await res.json(); } catch {}
+                  if (!res.ok) throw new Error((json && (json.error || json.message)) || `Add failed (${res.status})`);
+                  // Update local album tags
+                  setAlbum(prev => prev ? { ...prev, tags: Array.from(new Set([...(Array.isArray((prev as any).tags)?(prev as any).tags:[]), tag])) } as any : prev);
+                  setAddTagVisible(false);
+                } catch (e: any) {
+                  setNewTagError(e?.message || 'Failed to add tag');
+                }
+              }}
+              accessibilityLabel="Add tag"
+              style={styles.inviteButton}
+            >
+              <ThemedText style={styles.inviteButtonText}>Add tag</ThemedText>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+      {/* Add person modal (People directory for tagging) */}
+      <Modal visible={addPersonVisible} transparent animationType="fade" onRequestClose={() => setAddPersonVisible(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.inviteBackdrop}>
+          <View style={[styles.inviteCard, shadows.sm]}>            
+            <View style={styles.inviteHeaderRow}>
+              <ThemedText style={styles.inviteTitle}>Add a new person</ThemedText>
+              <TouchableOpacity onPress={() => setAddPersonVisible(false)} accessibilityLabel="Close add person">
+                <MaterialIcons name="close" size={22} color="#111" />
+              </TouchableOpacity>
+            </View>
+            <ThemedText style={styles.inviteSubtitle}>Add someone so you can easily filter photos that include them</ThemedText>
+            <ThemedText style={styles.inviteLabel}>Name</ThemedText>
+            <TextInput
+              value={newPersonName}
+              onChangeText={(t)=>{ setNewPersonName(t); if (newPersonError) setNewPersonError(null); }}
+              placeholder="Full name or nickname"
+              placeholderTextColor="#9a9a9a"
+              autoCapitalize="words"
+              autoCorrect={false}
+              style={styles.inviteInput}
+            />
+            <ThemedText style={styles.inviteLabel}>Picture</ThemedText>
+            <View style={{ flexDirection:'row', alignItems:'center', marginBottom:16 }}>
+              <View style={{ width:48, height:48, borderRadius:24, backgroundColor:'#f3f3f3', alignItems:'center', justifyContent:'center', borderWidth:1, borderColor:'#e2e2e2', marginRight:12, overflow:'hidden' }}>
+                {newPersonAvatarUri ? (
+                  <Image source={{ uri: newPersonAvatarUri }} style={{ width:'100%', height:'100%' }} />
+                ) : (
+                  <MaterialIcons name="person" size={26} color="#444" />
+                )}
+              </View>
+              <TouchableOpacity onPress={async () => {
+                try {
+                  await requestLibraryPermission();
+                  const result: any = await ImagePicker.launchImageLibraryAsync({ allowsEditing: true, quality: 0.7, mediaTypes: ImagePicker.MediaTypeOptions.Images });
+                  if (!result.canceled && result.assets && result.assets.length) {
+                    setNewPersonAvatarUri(result.assets[0].uri);
+                  }
+                } catch {
+                  // ignore
+                }
+              }} accessibilityLabel="Upload a photo" style={{ flexDirection:'row', alignItems:'center' }}>
+                <MaterialIcons name="file-upload" size={20} color="#444" style={{ marginRight:8 }} />
+                <ThemedText style={{ color:'#444', fontWeight:'600' }}>Upload a photo</ThemedText>
+              </TouchableOpacity>
+            </View>
+            {!!newPersonError && <ThemedText style={styles.inviteError}>{newPersonError}</ThemedText>}
+            <TouchableOpacity
+              onPress={async () => {
+                const name = (newPersonName || '').trim();
+                if (!name) { setNewPersonError('Please enter a name'); return; }
+                // Check duplicates (case-insensitive) across pool
+                const exists = peoplePool.some(p => p.toLowerCase() === name.toLowerCase());
+                if (exists) { setNewPersonError('That person already exists'); return; }
+                try {
+                  setSavingNewPerson(true);
+                  const next = [...extraPeople, { name, avatarUri: newPersonAvatarUri }];
+                  await saveExtraPeople(next);
+                  setAddPersonVisible(false);
+                  setNewPersonName('');
+                  setNewPersonAvatarUri(undefined);
+                } catch {
+                  setNewPersonError('Failed to save person');
+                } finally {
+                  setSavingNewPerson(false);
+                }
+              }}
+              disabled={savingNewPerson}
+              accessibilityLabel="Add person"
+              style={[styles.inviteButton, savingNewPerson && { opacity: 0.7 }]}
+            >
+              {savingNewPerson ? <ActivityIndicator color="#fff" /> : <ThemedText style={styles.inviteButtonText}>Add person</ThemedText>}
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </ThemedView>
   );
